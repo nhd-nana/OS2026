@@ -1,0 +1,4 @@
+# 统一使用 LF：内核代码在 WSL/Linux 下用 make 构建，CRLF 会导致 make 报错
+* text=auto eol=lf
+*.png binary
+*.jpg binary
