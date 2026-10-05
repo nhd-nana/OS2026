@@ -4,9 +4,9 @@
 
 | 项目 | 内容 |
 |------|------|
-| **实验名称** | Lab X: [实验名称] |
-| **小组成员** | 学号1-姓名1、学号2-姓名2、学号3-姓名3 |
-| **完成日期** | YYYY-MM-DD |
+| **实验名称** | Lab 1: 比麻雀更小的麻雀（最小可执行内核） |
+| **小组成员** | 2412799-葛熠（队长）、2412133-吕鹏哲、2412679-钟一成 |
+| **完成日期** | 2026-10-05 |
 
 ### 小组分工
 
@@ -14,9 +14,9 @@
 
 | 成员 | 负责的练习/模块 |
 |------|----------------|
-| 学号1-姓名1 | [练习或模块名称] |
-| 学号2-姓名2 | [练习或模块名称] |
-| 学号3-姓名3 | [练习或模块名称] |
+| 2412799-葛熠 | 环境与构建（Makefile / 交叉编译 / QEMU）+ 报告统稿 |
+| 2412133-吕鹏哲 | 练习2：GDB 调试与启动流程验证 |
+| 2412679-钟一成 | 练习1：内核入口与链接脚本分析 |
 
 实验报告如何分工？
 
@@ -28,9 +28,9 @@
 
 本实验的主要目的是：
 
-1. [目的1：例如，理解用户态进程如何通过系统调用进入内核]
-2. [目的2：例如，掌握进程创建、执行、退出的完整生命周期]
-3. [目的3：例如，学习使用 AI 辅助开发操作系统核心功能]
+1. 理解一台 RISC-V 计算机从加电复位到执行操作系统内核第一条指令的完整流程，理解 bootloader（OpenSBI）与内核的职责边界与交接方式
+2. 掌握链接脚本、交叉编译与内核镜像（ELF → BIN）的生成机制，理解内核为什么必须被加载到 `0x80200000` 这一固定地址
+3. 掌握用 QEMU 模拟硬件、用 GDB 远程调试内核的方法，并学习借助 AI 工具完成底层系统实验
 
 ---
 
@@ -40,9 +40,9 @@
 
 | 成员 | AI 编程工具 | 底层模型 | 备注 |
 |------|------------|---------|------|
-| 学号1-姓名1 | [例如：Cline（VS Code插件） / Claude Code（终端 Agent） / DeepSeek Harness等] | [例如：Claude Sonnet 4.5 / GPT-5.5 / DeepSeek-V4-Flash等] | [可选：特殊配置等] |
-| 学号2-姓名2 | | | |
-| 学号3-姓名3 | | | |
+| 2412799-葛熠 | VS Code + GitHub Copilot（Agent 模式） | Claude Sonnet 4.5 | 直接在仓库里改代码、跑 WSL 命令、提交 |
+| 2412133-吕鹏哲 | 待补充 | 待补充 | |
+| 2412679-钟一成 | 待补充 | 待补充 | |
 
 **说明：**
 - **AI 编程工具**：指具体使用的终端工具、编辑器插件、桌面应用或浏览器界面
@@ -153,11 +153,90 @@ int another_function(int arg);
 
 ---
 
-### 练习：[练习标题]
+### 练习1：理解内核启动中的程序入口操作
 
-**负责人：** [学号-姓名]
+**负责人：** 2412679-钟一成
 
-[按照练习的具体要求进行解答]
+**源码**（`kern/init/entry.S`）：
+
+```asm
+#include <mmu.h>
+#include <memlayout.h>
+
+    .section .text,"ax",%progbits
+    .globl kern_entry
+kern_entry:
+    la sp, bootstacktop
+
+    tail kern_init
+
+.section .data
+    # .align 2^12
+    .align PGSHIFT
+    .global bootstack
+bootstack:
+    .space KSTACKSIZE
+    .global bootstacktop
+bootstacktop:
+```
+
+#### （1）`la sp, bootstacktop` 完成了什么
+
+`la`（load address）是 RISC-V 汇编伪指令，展开为 `auipc sp, %pcrel_hi(bootstacktop)` + `addi sp, sp, %pcrel_lo(bootstacktop)`，即**以 PC 相对寻址的方式，把符号 `bootstacktop` 的地址装入栈指针 `sp`**。
+
+编译链接后用 `riscv64-unknown-elf-objdump -d bin/kernel` 可以看到（链接器做了松弛优化）：
+
+```
+0000000080200000 <kern_entry>:
+    80200000: 00003117      auipc sp,0x3
+    80200004: 00010113      mv    sp,sp          # addi sp,sp,0 的残留
+    80200008: a009          j     8020000a <kern_init>
+```
+
+即 `sp = 0x80200000 + 0x3000 = 0x80203000`，与符号表一致（`riscv64-unknown-elf-nm bin/kernel`）：
+
+```
+0000000080200000 T kern_entry
+000000008020000a T kern_init
+0000000080201000 D bootstack
+0000000080203000 D bootstacktop
+```
+
+**目的**：为 C 语言函数的调用准备内核栈。RISC-V 不同于 x86，**没有硬件栈机制**，`sp` 只是一个普通通用寄存器，必须由软件显式设置。`bootstacktop` 是同一文件 `.data` 段中 `bootstack`（`.space KSTACKSIZE`，即 `2 × 4096 = 8KB`）的高地址端：
+
+| 符号 | 地址 | 含义 |
+|---|---|---|
+| `bootstack` | `0x80201000` | 栈底（低地址） |
+| `bootstacktop` | `0x80203000` | 栈顶（高地址），也是 `sp` 的初始值 |
+
+RISC-V 的栈是**向低地址增长**的，所以 `sp` 必须指向这块内存的**高地址端**（`bootstacktop`）而不是 `bootstack`；前面的 `.align PGSHIFT` 保证它页对齐（实测 `0x80203000` 是 4KB 对齐的地址），满足 RISC-V 调用约定对栈指针对齐的要求。
+
+如果不先设置 `sp` 就直接调用 C 函数，编译器生成的 `sd ra, ...(sp)`、局部变量入栈等指令会写到未定义的内存上，内核必然崩溃。
+
+**为什么不能沿用 OpenSBI 留下的 `sp`**：此时 CPU 刚从 M 态固件（OpenSBI）跳入 S 态内核，`sp` 指向的是 **M 态固件自己的栈**。内核如果直接使用，会踩坏固件的数据；而且那块内存的归属与管理并不属于内核。因此内核入口的第一件事就是用自己的静态内存（`.data` 段的 `bootstack`）建立私有栈。
+
+#### （2）`tail kern_init` 完成了什么
+
+`tail` 是 RISC-V 的伪指令，展开为 `auipc t1, %pcrel_hi(kern_init)` + `jalr x0, t1, %pcrel_lo(kern_init)`：**跳转到 `kern_init` 并把返回地址写入 `x0`（丢弃）**，临时寄存器用 `t1`，因此不修改返回地址寄存器 `ra`。本例中 `kern_init` 恰好紧跟其后，链接器在松弛阶段直接化简为一条 `j 8020000a <kern_init>`（见上面反汇编）。
+
+**目的**：把控制权从汇编入口 `kern_entry` 移交给 C 语言写的内核初始化函数 `kern_init()`，从此开始执行 C 代码。
+
+**为什么用 `tail` 而不是 `call` / `jal`**：
+
+1. `kern_init()` 的声明是 `int kern_init(void) __attribute__((noreturn))`，函数体末尾是 `while (1);`，**永远不会返回**。既然不会返回，保存返回地址就没有任何意义。
+2. 语义上这是「**移交控制权**」而不是「调用」：不需要为被调用者建立新的栈帧，也不需要 `ra` 记录“是谁调用的我”（`kern_init` 内部若用到 `ra` 也不会破坏任何有效信息）。这使入口处的栈状态保持最简：`sp` 一设好就直接进 C 函数。
+3. 寻址范围：`jal` 的相对跳转立即数只有 20 位（±1MB），而 `tail`（`auipc` + `jalr`）可以达到 PC 相对 ±2GB，因此不要求 `kern_init` 在链接后恰好落在 `kern_entry` 附近。
+
+#### （3）补充观察
+
+在 `kern_init()` 开头还有一句 `memset(edata, 0, end - edata);`，作用是清除 BSS 段。从符号表可以看到：
+
+```
+0000000080203008 D edata
+0000000080203008 D end
+```
+
+lab1 里 `edata == end`（`.bss` 为空，内核没有未初始化的全局/静态变量），所以这一步目前实际是空操作；它是为后续引入 BSS 变量的实验准备的。这也从侧面说明：`entry.S` 只做“建栈 + 移交控制权”两件事，BSS 清零这类 C 运行环境准备交给了 `kern_init()`。
 
 ---
 
