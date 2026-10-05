@@ -240,11 +240,99 @@ lab1 里 `edata == end`（`.bss` 为空，内核没有未初始化的全局/静�
 
 ---
 
-### Challenge：[Challenge标题]
+### 练习2：使用 GDB 验证启动流程
 
-**负责人：** [学号-姓名]
+**负责人：** 2412133-吕鹏哲
 
-[按照Challenge的具体要求进行解答]
+#### 调试环境与方式
+
+内核运行在 QEMU 里，无法像普通程序那样直接启动调试器，因此改用 **QEMU gdbstub 远程调试**：一个终端跑 `make debug`（即 `qemu-system-riscv64 -machine virt -nographic -bios default -kernel bin/ucore.img -s -S`，`-S` 让 CPU 在复位后立刻停住等 GDB，`-s` 在 1234 端口开 gdbstub），另一个终端跑 `make gdb`（`riscv64-unknown-elf-gdb -ex 'file bin/kernel' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'`）。
+
+#### 调试过程与观察记录
+
+**① 加电复位：PC = 0x1000**
+
+```
+(gdb) info registers pc
+pc             0x1000	0x1000
+(gdb) x/6i $pc
+=> 0x1000:	auipc	t0,0x0          # t0 = 0x1000，作后续取数据的基址
+   0x1004:	addi	a2,t0,40        # a2 = 0x1028（fw_dynamic info 结构体地址）
+   0x1008:	csrr	a0,mhartid      # a0 = 当前 hart id
+   0x100c:	ld	a1,32(t0)       # a1 = *(0x1020) = 0x87000000（DTB 地址）
+   0x1010:	ld	t0,24(t0)       # t0 = *(0x1018) = 0x80000000（固件入口）
+   0x1014:	jr	t0              # 跳转到 OpenSBI
+```
+
+**② 单步 6 条指令，控制权进入 OpenSBI**
+
+```
+(gdb) si 6
+(gdb) info registers pc t0 a2
+pc   0x80000000
+t0   0x80000000
+a2   0x1028
+(gdb) x/4i $pc
+=> 0x80000000:	add	s0,a0,zero     # 保存 a0/a1/a2（hart id / DTB / fw_dynamic info）
+   0x80000004:	add	s1,a1,zero
+   0x80000008:	add	s2,a2,zero
+   0x8000000c:	jal	0x80000560     # 进入 OpenSBI 主初始化
+```
+
+MROM 中的常量表也验证了上面的参数来源：
+
+```
+(gdb) x/4gx 0x1018
+0x1018:	0x0000000080000000	0x0000000087000000
+0x1028:	0x000000004942534f	0x0000000000000002      # 魔数 "OSBI" + 版本 2
+```
+
+**③ 在 0x80200000 打断点，验证“控制权交接”**
+
+```
+(gdb) x/4i 0x80200000                 # 复位时该地址已经放着内核镜像
+   0x80200000 <kern_entry>:	auipc	sp,0x3
+(gdb) b *0x80200000
+Breakpoint 1 at 0x80200000: file kern/init/entry.S, line 7.
+(gdb) c
+Breakpoint 1, kern_entry () at kern/init/entry.S:7
+7	    la sp, bootstacktop
+(gdb) info registers pc sp
+pc             0x80200000	0x80200000 <kern_entry>
+sp             0x8003def0	0x8003def0               # 仍是 OpenSBI 的栈
+(gdb) si 3
+(gdb) info registers pc sp
+pc             0x8020000a	0x8020000a <kern_init>
+sp             0x80203000	0x80203000 <SBI_CONSOLE_PUTCHAR>   # = bootstacktop
+```
+
+`sp` 从 `0x8003def0`（OpenSBI 在 0x8003xxxx 区域的栈）变成 `0x80203000`（`bootstacktop`），与练习1 的结论互相印证。
+
+**④ 一个与指导书 tip 不同的观察**
+
+指导书建议用 `watch *0x80200000` 观察内核被加载的瞬间。实测在本环境（QEMU 7.0）中，**内核镜像在 CPU 复位之前就已经由 QEMU 的机器初始化写好了**：复位时用 `x/4i 0x80200000` 就能看到 `kern_entry` 的指令，该 watchpoint 不会触发（用 `-device loader` 也一样，加载同样发生在机器初始化阶段）。因此，“把内核放入内存”是 QEMU 完成的，OpenSBI 与内核之间交接的是**控制权**，而不是“由 OpenSBI 把内核搬进内存”。相比之下更可靠的验证手段是：`b *0x80200000` 断点 + `info registers pc/sp`。
+
+#### 回答练习提出的问题
+
+**RISC-V 硬件加电后最初执行的几条指令位于什么地址？**
+
+位于 **`0x1000`**，即 QEMU “virt” 机器的**复位向量地址**。RISC-V 规范允许实现者自行选择复位地址（如 x86 是 `0xFFF0`、MIPS 是 `0`），QEMU 选的是 `0x1000`，与固件所在的 `0x80000000`、内核所在的 `0x80200000` 都不是同一处。这段代码是 QEMU 内置的 **MROM**，上面反汇编出的 6 条指令（`0x1000`–`0x1014`）就是它执行的全部代码，`0x1018` 之后是它用的常量表。
+
+**它们主要完成了哪些功能？**
+
+MROM 只做一件事：**把机器交给固件**，具体是：
+
+1. 读取 hart id 放入 `a0`（`csrr a0, mhartid`）；
+2. 按 RISC-V 固件引导协议准备参数：`a1 = *(0x1020) = 0x87000000`（设备树 DTB 地址）、`a2 = 0x1028`（`fw_dynamic` 信息结构体，魔数 `0x4942534f` 即 "OSBI"、版本 2）；
+3. 把固件入口地址 `0x80000000` 取入 `t0` 后 `jr t0` 跳转过去。
+
+也就是说硬件只保证“PC 从 `0x1000` 开始”，而把硬件初始化、内存探测、为下一级准备运行环境等复杂工作留给固件：OpenSBI 在 M 态完成初始化（banner 里可见 `MIDELEG`/`MEDELEG`/PMP 配置与 Firmware Base `0x80000000`），最后在 S 态把控制权交给 `0x80200000` 处的内核。这正是“固件 → 引导程序 → 操作系统”三级跳在本实验中的具体体现。
+
+---
+
+### Challenge
+
+本实验指导书未设置 Challenge；唯一需要改动的代码是 QEMU 启动方式（见“功能模块：环境与构建”一节），已在报告中作为实现迭代过程记录。
 
 ---
 
