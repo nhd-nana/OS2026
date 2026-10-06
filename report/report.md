@@ -403,9 +403,11 @@ Boot HART MEDELEG         : 0x0000000000f0b509
 
 ### 2. GDB 调试验证（`make debug` + `make gdb`）
 
-- 复位时 `pc = 0x1000`（MROM），`si 6` 后进入 `0x80000000`（OpenSBI）；
-- `b *0x80200000` + `c` 命中 `kern_entry`，此时 `sp = 0x8003def0`（OpenSBI 的栈）；
+- 复位时 `pc = 0x1000`（MROM），`x/6i $pc` 可见 MROM 的 6 条指令；
+- `b *0x80200000` + `c` 命中 `kern_entry`（`kern/init/entry.S:7`），此时 `sp = 0x8003def0`（OpenSBI 的栈）；
 - `si 3` 后 `pc = 0x8020000a <kern_init>`、`sp = 0x80203000 <SBI_CONSOLE_PUTCHAR>`，即 `bootstacktop`。
+
+（`si 6` 后进入 `0x80000000` OpenSBI 入口的观察见练习2 的调试记录。）
 
 ![GDB 验证启动流程](./images/lab1_gdb_boot.png)
 
