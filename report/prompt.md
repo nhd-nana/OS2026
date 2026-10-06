@@ -7,7 +7,7 @@
 
 | 成员 | AI 编程工具 | 底层模型 | 备注 |
 |------|------------|---------|------|
-| 2412799-葛熠 | VS Code + GitHub Copilot（Agent 模式） | Claude Sonnet 4.5 | 直接在仓库中改文件、在 WSL 执行 make/qemu/gdb、提交推送 |
+| 2412799-葛熠 | VS Code + Copilot（Agent 模式） | DeepSeek V4.1 Flash | 直接在仓库中改文件、在 WSL 执行 make/qemu/gdb、提交推送 |
 | 2412133-吕鹏哲 | 待补充 | 待补充 | |
 | 2412679-钟一成 | 待补充 | 待补充 | |
 
