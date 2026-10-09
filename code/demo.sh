@@ -3,7 +3,8 @@
 # Lab1 演示脚本 —— 最小可执行内核（riscv64-ucore）
 #
 # 用法（在本目录下执行）：
-#   ./demo.sh run            编译并运行内核（前台；退出：Ctrl+A 松开后再按 X）
+#   ./demo.sh run            清理后完整编译（显示 cc/ld/objcopy 全过程）并运行内核
+#                            （前台；退出：Ctrl+A 松开后再按 X）
 #   ./demo.sh run --log      同上，并把输出同时存到 /tmp/lab1_demo_run.log
 #   ./demo.sh gdb            自动起 QEMU(-s -S) 并进入 GDB，自动演示启动流程，
 #                            演示完停在 GDB 提示符，可继续自己敲命令
@@ -28,9 +29,22 @@ info() { printf '\033[36m[demo]\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m[demo]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[demo]\033[0m %s\n' "$*"; }
 
+# 静默编译：只报结果，用于 gdb 演示（不需要刷一屏编译输出）
 build() {
     info "编译中 ..."
     if ! make >/dev/null; then
+        warn "编译失败，请先修好再演示"
+        exit 1
+    fi
+    ok "编译完成：$IMG（$(stat -c%s "$IMG") 字节 = end - 0x80200000）"
+}
+
+# 完整编译：先 clean 再编译，让交叉编译链路（cc → ld → objcopy）完整显示，
+# 用于 run 演示 —— 这是“代码是怎么变成镜像的”的直接证据。
+build_verbose() {
+    info "清理后重新编译 ..."
+    make clean >/dev/null 2>&1
+    if ! make; then
         warn "编译失败，请先修好再演示"
         exit 1
     fi
@@ -64,7 +78,7 @@ check_tools() {
 
 cmd_run() {
     check_tools
-    build
+    build_verbose
     cat <<'TIP'
 
 ======================================================================
@@ -140,7 +154,7 @@ info registers pc sp
 echo \n>>> 演示结束。下面可自由调试；想看内核运行结果就先 quit，再执行 ./demo.sh run\n
 GDBEOF
 
-    if [ "$batch" = "1" ]; then
+    if [ "$batch" = "--batch" ] || [ "$batch" = "1" ]; then
         echo quit >>"$GDBSCRIPT"
         info "GDB 批处理模式运行 ..."
     else
