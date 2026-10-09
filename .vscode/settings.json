@@ -1,0 +1,10 @@
+{
+  // 本仓库的内核代码必须在 WSL 里构建/运行（Windows 侧没有 RISC-V 工具链）。
+  // 这里把 Code Runner 执行 shell 脚本的方式改为走 WSL；默认分发版若不叫 Ubuntu2204 请自行改名。
+  "code-runner.executorMap": {
+    "shellscript": "wsl -d Ubuntu2204 bash $fileName"
+  },
+  "code-runner.fileDirectoryAsCwd": true,
+  "code-runner.runInTerminal": true,
+  "files.eol": "\n"
+}
