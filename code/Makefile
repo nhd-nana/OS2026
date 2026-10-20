@@ -10,7 +10,14 @@ GCCPREFIX := riscv64-unknown-elf-
 #endif
 
 ifndef QEMU
+# 优先使用本地编译的 QEMU 4.1.1（lab2 依赖旧版的 satp/翻译行为）；
+# 没有则退回 PATH 里的 qemu-system-riscv64。可用 make QEMU=... 覆盖。
+QEMU_LOCAL := $(HOME)/opt/qemu-4.1.1/bin/qemu-system-riscv64
+ifeq ($(wildcard $(QEMU_LOCAL)),)
 QEMU := qemu-system-riscv64
+else
+QEMU := $(QEMU_LOCAL)
+endif
 endif
 
 ifndef SPIKE
