@@ -740,7 +740,7 @@ Total Score: 20/20
 
 #### 5.3.1 Buddy System（吕鹏哲）
 
-临时把 `pmm.c` 的 `pmm_manager` 切到 `&buddy_pmm_manager` 后，`make qemu` 输出（关键行）：
+临时把 `pmm.c` 的 `pmm_manager` 切到 `&buddy_pmm_manager`（`pmm.c` 已 `#include <buddy_pmm.h>`，只需改这一行）后，`make qemu` 输出（关键行）：
 
 ```
 memory management: buddy_pmm_manager
