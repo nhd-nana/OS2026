@@ -387,7 +387,217 @@ Total Score: 20/20
 
 **负责人：** 2412133-吕鹏哲
 
-<!-- 待吕鹏哲填写：模块功能描述 / 最终提示词（两份）/ 实现迭代过程 / 测试覆盖说明 -->
+#### 模块功能描述
+
+**需要实现/修改的接口：**
+
+```c
+// kern/mm/buddy_pmm.c / buddy_pmm.h
+static void buddy_init(void);
+static void buddy_init_memmap(struct Page *base, size_t n);
+static struct Page *buddy_alloc_pages(size_t n);
+static void buddy_free_pages(struct Page *base, size_t n);
+static size_t buddy_nr_free_pages(void);
+static void buddy_pmm_check(void);      // check 的 void 签名适配器
+int buddy_check(void);                  // 只读不变量检查，返回失败数
+void buddy_dump_free_lists(void);
+const struct pmm_manager buddy_pmm_manager;
+```
+
+**功能说明：**
+
+Buddy System 把空闲物理页按 2 的幂次组织：每个 order（0～`MAX_ORDER=15`，128 MiB = 2^15 页）
+维护一条空闲双向链表 `free_list[order]`，节点复用 `Page->page_link`。分配 `n` 页时取
+`order = ceil_log2(n)`，从 `>= order` 的第一个非空链表取一块，逐级把高半作为 buddy 放入低一阶
+链表、保留低半；回收时把块放回对应阶，再与 buddy（`idx ^ (1<<order)`）迭代合并到不能合并为止。
+
+与 Best-Fit 不同，`struct Page` 里没有字段能存“已分配块的大小 n”，而 `free_pages(base, n)`
+的契约要求释放时的 n 必须与分配时一致，因此本模块额外维护一张**静态分配记录数组**
+`alloc_records[]`（记录 `base / order / n`），分配时登记、释放时按 `base` 查表核对 n，
+不匹配则打印警告并返回、不改动任何链表与计数。整张表与 `free_list` 一样是编译期静态分配，
+不依赖 `malloc`/libc。
+
+`buddy_check()` 是**只读**的不变量检查（返回失败数、不 panic），逐条校验：各阶链表无环、
+块首在管理范围内且按 2^order 对齐、无重复块、空闲页总和 == `nr_free`、分配记录合法且不与
+空闲块/其它记录重叠；`buddy_pmm_check()` 是 `check` 的 void 适配器，先跑不变量，再做一次
+“分配 → 非法释放 → 释放”的往返自测。`buddy_test()`（见 [kern/mm/buddy_test.c](code/kern/mm/buddy_test.c)）
+则在 `kern_init()` 里于 `pmm_init()` 之后调用，用黑盒接口跑 8 个用例。
+
+#### 最终提示词（两份）
+
+**（1）生成实现的 prompt：**
+
+````markdown
+[PROMPT]
+**任务**：从零实现 Buddy System 物理页分配器，新建 kern/mm/buddy_pmm.c 与 kern/mm/buddy_pmm.h，
+注册 buddy_pmm_manager。块大小为 2^order 页（order ∈ [0, MAX_ORDER]）：分配时从高阶块分裂出低阶块，
+回收时与相邻 buddy 迭代合并回高阶。
+**操作要求**：必须先读仓库真实接口（struct Page / struct pmm_manager / libs/list.h / pmm.h），
+不要臆造签名；新增 .c 放在 kern/mm/ 下自动参与编译，无需改 Makefile；不修改 pmm.c 与 basic_check()/best_fit_check()。
+**输出要求**：直接改文件；解释 pmm_init() 里 init() 与 init_memmap() 的先后调用关系；
+给出验证命令与预期输出。
+
+[RELY]
+// struct Page（kern/mm/memlayout.h）
+struct Page { int ref; uint64_t flags; unsigned int property; list_entry_t page_link; };
+// 页号换算（kern/mm/pmm.h）
+static inline ppn_t page2ppn(struct Page *p) { return p - pages + nbase; }  // nbase = DRAM_BASE/PGSIZE = 0x80000 = 2^19
+// 关键性质：nbase 是 2 的幂，因此 pages 下标 idx = p - pages 与物理页号同余，
+// “块按 2^order 页对齐”等价于“idx % (1<<order) == 0”。
+// 链表（libs/list.h）：空闲块复用 Page->page_link 做节点
+list_init / list_add(插到 head 之后) / list_del / list_next / list_empty / le2page
+// 物理内存 128MiB = 2^15 页 → MAX_ORDER = 15
+// 类型注意：defs.h 只有 typedef int bool，没有 #define true/false（-Werror 下会报 undeclared）
+
+[GUARANTEE]
+必须实现（与 struct pmm_manager 成员签名一致）：
+```c
+static void buddy_init(void);
+static void buddy_init_memmap(struct Page *base, size_t n);
+static struct Page *buddy_alloc_pages(size_t n);
+static void buddy_free_pages(struct Page *base, size_t n);
+static size_t buddy_nr_free_pages(void);
+static void buddy_pmm_check(void);   // check 的 void 签名适配器
+int buddy_check(void);               // 只读不变量检查，返回失败数，不得 panic
+void buddy_dump_free_lists(void);
+const struct pmm_manager buddy_pmm_manager;
+```
+内部状态：free_list[MAX_ORDER+1] 双向链表 + 静态分配记录数组（base/order/n，记录已分配块），
+不得 malloc/libc。允许新增 static 辅助函数（ceil_log2、查找/插入记录、判断空闲块头等）。
+
+[SPECIFICATION]
+## buddy_init_memmap(base, n)
+**Pre-Condition**：n > 0；这 n 页均为 PageReserved（page_init 已标记）。
+**Post-Condition**：逐页清 flags/property/ref；把 [base, base+n) 按“最大对齐且 ≤ 剩余页数”切分
+为 2^order 块（要求 idx % (1<<order) == 0）插入 free_list[order]；nr_free += n；记录管理范围 [start, end)。
+
+## buddy_alloc_pages(n)
+**Pre-Condition**：n > 0。
+**Post-Condition**：order = ceil_log2(n)（满足 2^order >= n 的最小阶）；从 >= order 的第一个非空链表
+取一块，逐级把高半作为 buddy 放入低一阶链表、保留低半继续；nr_free -= 2^order；记录 (base, order, n) 后返回块首。
+**Case 1（n == 0）**：返回 NULL。
+**Case 2（order > MAX_ORDER 或无足够空闲）**：返回 NULL，不改变任何状态。
+**Case 3（记录表满）**：打印提示并返回 NULL，不改变任何状态。
+
+## buddy_free_pages(base, n)
+**Pre-Condition**：base 是此前 alloc_pages 返回的块首，n 与分配时的请求页数一致。
+**Post-Condition**：查记录；base 无记录或 n 不匹配 → 打印警告并返回，**不得修改链表与计数**；
+否则清记录、nr_free += 2^order、插入 free_list[order]，随后与 buddy 合并：
+buddy_idx = idx ^ (1<<order)；若 buddy_idx 在管理范围内且 buddy 是空闲块头（在 free_list[order] 中），
+则把两者摘除、块首取 min(base, buddy)、order++ 后重新插入，重复到不能合并为止。
+**Requirements**：base == NULL 或 n == 0 同样只打印并返回；合并循环上限 MAX_ORDER。
+````
+
+**（2）生成测试的 prompt：**
+
+````markdown
+[PROMPT]
+**任务**：为 Buddy System 设计并实现内核态测试，新建 kern/mm/buddy_test.c 与 kern/mm/buddy_test.h，
+并在 kern_init() 的 pmm_init() 之后调用 buddy_test()。
+**操作要求**：只通过黑盒接口 alloc_pages/free_pages/nr_free_pages 与只读 buddy_check() 验证，
+不修改 Buddy 分配逻辑；单个用例失败只 cprintf 打印并计数，绝不 panic；
+使用 cprintf 输出 PASS/FAIL；最终返回失败用例数。
+**输出要求**：直接改文件；说明每个用例覆盖的核心行为与边界；给出运行命令与预期输出。
+
+[RELY]
+// 黑盒接口（kern/mm/pmm.h）
+struct Page *alloc_pages(size_t n);  void free_pages(struct Page *base, size_t n);
+size_t nr_free_pages(void);
+// 只读不变量钩子
+int buddy_check(void);               // 返回失败数，0 表示内部不变量全部成立
+// 输出
+cprintf(...)                         // libs/stdio.h
+// 入口门控：buddy_check() 依赖 buddy 初始化后的 free_list；当 pmm_manager != &buddy_pmm_manager
+// 时（如提交态 best_fit）free_list 是零初始化，直接调用会越界，故 buddy_test() 需先判断再运行。
+
+[GUARANTEE]
+必须实现（函数名与签名固定，缺一不可）：
+```c
+int buddy_test(void);
+static int test_init_capacity(void);
+static int test_basic_alloc_free(void);
+static int test_non_power_of_two(void);
+static int test_split(void);
+static int test_merge_orders(void);
+static int test_fragmentation_exhaustion(void);
+static int test_boundary_invalid(void);
+static int test_random_stress(void);
+static int check_invariants(const char *case_name);
+static unsigned int lcg_next(unsigned int *seed);
+```
+
+[SPECIFICATION]
+**总约定**：buddy_test() 顺序跑 8 个用例；每个用例记录 before = nr_free_pages()，并在用例前后各调一次
+buddy_check()；返回失败用例数（0 表示全过），最后打印 "X/Y passed, Z failed"。
+**LCG**：lcg_next 必须实现 `*seed = (*seed) * 1103515245u + 12345u`，禁止依赖 libc/rand。
+**随机压力 Case**：用 LCG 交替生成分配/释放与大小，每次操作后满足
+`nr_free_pages() + 已分配实际页数 == before`；周期性检查分配区间不重叠并调用 buddy_check()。
+**非法操作 Case**：alloc_pages(0)、alloc 超过空闲页数、alloc 超过 MAX_ORDER、free(NULL)、
+双重释放、释放非块头页、释放 n 与记录不一致——均须安全返回且计数不变。
+````
+
+#### 实现迭代过程
+
+本模块实现经历了 3 次迭代，外加一次运行环境层面的排查。
+
+##### 第一次迭代：`true`/`false` 未声明（编译失败）
+
+**提示词**：按上面的四段式规格生成 buddy 分配器。
+
+**遇到的问题：**
+
+```
+kern/mm/buddy_pmm.c: In function 'is_free_head':
+kern/mm/buddy_pmm.c:84: error: 'true' undeclared (first use in this function)
+kern/mm/buddy_pmm.c: In function 'buddy_check':
+kern/mm/buddy_pmm.c:282: error: 'false' undeclared (first use in this function)
+```
+
+原因：`defs.h` 只 `typedef int bool`，**没有** `#define true/false`；而工程用 `-Werror`，
+`true/false` 直接变成 error。
+
+**问题解决策略**：在 [RELY] 里补一句“defs.h 只有 `typedef int bool`，无 true/false 宏”，
+代码改用 `1`/`0`（`is_free_head` 返回 `1/0`、`buddy_check` 的 `has_cycle` 用 `1/0`）。
+
+##### 第二次迭代：ceil_log2 差一，块首不对齐（断言失败）
+
+**提示词**：修正编译后重新生成 `buddy_alloc_pages` 里的 order 计算。
+
+**遇到的问题：**
+
+```
+kernel panic at kern/mm/buddy_pmm.c:...:
+    assertion failed: page_index(p1) % 4 == 0
+```
+
+原因：`ceil_log2` 写成了 `while (v >>= 1) order++;`，这实际算的是 `floor(log2(n-1))`。
+对 `alloc_pages(3)`，n-1=2，算出 order=1（2 页），而正确应 order=2（4 页）；2 页块首可能
+`% 4 != 0`，触发 `buddy_pmm_check` 的对齐断言。
+
+**问题解决策略**：在 [SPECIFICATION] 把 `ceil_log2` 语义写成可执行的不变式——
+`ceil_log2(n) = floor(log2(n-1)) + 1`，对应 `while (v > 0) { v >>= 1; order++; }`（v = n-1）。
+
+##### 第三次迭代：验证通过
+
+**结果**：`make` 通过；`buddy_pmm_check()` 与 `buddy_test()` 8/8 全部 PASS（输出见 5.3.1）。
+关键点：把“非法释放不改状态”写成 `buddy_free_pages` 的显式 Post-Condition（n 不匹配即返回），
+这既是 `buddy_pmm_check` 往返自测的前提，也是 8 个测试用例里 `test_boundary_invalid` 的验收依据。
+
+##### 环境排查：QEMU 挂起导致无法抓到完整输出
+
+**遇到的问题**：`timeout 12 make qemu | tail` 一直不返回；`cmd & QPID=$!; sleep 9; kill $QPID`
+也挂住。原因是 QEMU 前台运行不退出、`SIGTERM` 杀不掉，孤儿进程让管道一直开着。
+
+**问题解决策略**：改为 `timeout --signal=KILL 8 qemu... > /tmp/log 2>&1`（输出落盘、无管道、
+`SIGKILL` 强制结束），再 `cat` 日志；不用 `pkill -9`（会误杀别的进程），按 PID 精确结束。
+
+#### 测试覆盖说明
+
+8 个用例按“基础 → 分裂/合并 → 规模压力 → 非法边界 → 随机”分层，每层都用 `nr_free_pages()`
+计数守恒与 `buddy_check()` 只读不变量双保险（详见 [prompt.md 3.3](report/prompt.md)）。
+核心思路：Buddy 的实质不变量只有“块首按 2^order 对齐”和“分裂/合并后计数守恒”，
+前者由 `buddy_check()` 逐链表校验，后者由每个用例的 `before == after` 与随机压力用例的
+每步增量守恒约束；非法释放不改状态则单独覆盖 `alloc(0)`/双重释放/释放非块头/n 不匹配等边界。
 
 ---
 
@@ -487,7 +697,46 @@ Total Score: 20/20
 
 ### 5.3 扩展模块验证
 
-<!-- 待吕鹏哲（Buddy）、钟一成（SLUB）补充各自的测试输出与截图 -->
+#### 5.3.1 Buddy System（吕鹏哲）
+
+临时把 `pmm.c` 的 `pmm_manager` 切到 `&buddy_pmm_manager` 后，`make qemu` 输出（关键行）：
+
+```
+memory management: buddy_pmm_manager
+free pages: 0x7c81
+buddy_pmm_check() succeeded!
+check_alloc_page() succeeded!
+buddy_test: running init_capacity ...
+  [init_capacity] PASS
+buddy_test: running basic_alloc_free ...
+  [basic_alloc_free] PASS
+buddy_test: running non_power_of_two ...
+  [non_power_of_two] PASS
+buddy_test: running split ...
+  [split] PASS
+buddy_test: running merge_orders ...
+  [merge_orders] PASS
+buddy_test: running fragmentation_exhaustion ...
+  [fragmentation_exhaustion] PASS
+buddy_test: running boundary_invalid ...
+  [boundary_invalid] PASS
+buddy_test: running random_stress ...
+  [random_stress] PASS
+buddy_test: 8/8 passed, 0 failed
+```
+
+![buddy_test 运行结果](./images/lab2_buddy.png)
+
+| 输出 | 含义 |
+|---|---|
+| `memory management: buddy_pmm_manager` | 分配器已临时切换为 Buddy（验证完改回 best_fit） |
+| `free pages: 0x7c81` | 可用空闲页总数（= 31873 页，与 best_fit 同量级） |
+| `buddy_pmm_check() succeeded!` | `check` 的 void 适配器通过（不变量 + 分配/非法释放/释放往返自测） |
+| `buddy_test: 8/8 passed, 0 failed` | 8 个黑盒用例全部通过，返回失败数 0 |
+
+#### 5.3.2 SLUB（钟一成）
+
+<!-- 待钟一成补充 SLUB 的测试输出与截图 -->
 
 ---
 

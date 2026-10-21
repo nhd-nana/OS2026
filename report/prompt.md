@@ -206,18 +206,135 @@ Total Score: 20/20
 ### 3.1 生成实现的 prompt
 
 ````markdown
-<!-- 待吕鹏哲填写 -->
+[PROMPT]
+**任务**：从零实现 Buddy System 物理页分配器，新建 kern/mm/buddy_pmm.c 与 kern/mm/buddy_pmm.h，
+注册 buddy_pmm_manager。块大小为 2^order 页（order ∈ [0, MAX_ORDER]）：分配时从高阶块分裂出低阶块，
+回收时与相邻 buddy 迭代合并回高阶。
+**操作要求**：必须先读仓库真实接口（struct Page / struct pmm_manager / libs/list.h / pmm.h），
+不要臆造签名；新增 .c 放在 kern/mm/ 下自动参与编译，无需改 Makefile；不修改 pmm.c 与 basic_check()/best_fit_check()。
+**输出要求**：直接改文件；解释 pmm_init() 里 init() 与 init_memmap() 的先后调用关系；
+给出验证命令与预期输出。
+
+[RELY]
+// struct Page（kern/mm/memlayout.h）
+struct Page { int ref; uint64_t flags; unsigned int property; list_entry_t page_link; };
+// 页号换算（kern/mm/pmm.h）
+static inline ppn_t page2ppn(struct Page *p) { return p - pages + nbase; }  // nbase = DRAM_BASE/PGSIZE = 0x80000 = 2^19
+// 关键性质：nbase 是 2 的幂，因此 pages 下标 idx = p - pages 与物理页号同余，
+// “块按 2^order 页对齐”等价于“idx % (1<<order) == 0”。
+// 链表（libs/list.h）：空闲块复用 Page->page_link 做节点
+list_init / list_add(插到 head 之后) / list_del / list_next / list_empty / le2page
+// 物理内存 128MiB = 2^15 页 → MAX_ORDER = 15
+// 类型注意：defs.h 只有 typedef int bool，没有 #define true/false（-Werror 下会报 undeclared）
+
+[GUARANTEE]
+必须实现（与 struct pmm_manager 成员签名一致）：
+```c
+static void buddy_init(void);
+static void buddy_init_memmap(struct Page *base, size_t n);
+static struct Page *buddy_alloc_pages(size_t n);
+static void buddy_free_pages(struct Page *base, size_t n);
+static size_t buddy_nr_free_pages(void);
+static void buddy_pmm_check(void);   // check 的 void 签名适配器
+int buddy_check(void);               // 只读不变量检查，返回失败数，不得 panic
+void buddy_dump_free_lists(void);
+const struct pmm_manager buddy_pmm_manager;
+```
+内部状态：free_list[MAX_ORDER+1] 双向链表 + 静态分配记录数组（base/order/n，记录已分配块），
+不得 malloc/libc。允许新增 static 辅助函数（ceil_log2、查找/插入记录、判断空闲块头等）。
+
+[SPECIFICATION]
+## buddy_init_memmap(base, n)
+**Pre-Condition**：n > 0；这 n 页均为 PageReserved（page_init 已标记）。
+**Post-Condition**：逐页清 flags/property/ref；把 [base, base+n) 按“最大对齐且 ≤ 剩余页数”切分
+为 2^order 块（要求 idx % (1<<order) == 0）插入 free_list[order]；nr_free += n；记录管理范围 [start, end)。
+
+## buddy_alloc_pages(n)
+**Pre-Condition**：n > 0。
+**Post-Condition**：order = ceil_log2(n)（满足 2^order >= n 的最小阶）；从 >= order 的第一个非空链表
+取一块，逐级把高半作为 buddy 放入低一阶链表、保留低半继续；nr_free -= 2^order；记录 (base, order, n) 后返回块首。
+**Case 1（n == 0）**：返回 NULL。
+**Case 2（order > MAX_ORDER 或无足够空闲）**：返回 NULL，不改变任何状态。
+**Case 3（记录表满）**：打印提示并返回 NULL，不改变任何状态。
+
+## buddy_free_pages(base, n)
+**Pre-Condition**：base 是此前 alloc_pages 返回的块首，n 与分配时的请求页数一致。
+**Post-Condition**：查记录；base 无记录或 n 不匹配 → 打印警告并返回，**不得修改链表与计数**；
+否则清记录、nr_free += 2^order、插入 free_list[order]，随后与 buddy 合并：
+buddy_idx = idx ^ (1<<order)；若 buddy_idx 在管理范围内且 buddy 是空闲块头（在 free_list[order] 中），
+则把两者摘除、块首取 min(base, buddy)、order++ 后重新插入，重复到不能合并为止。
+**Requirements**：base == NULL 或 n == 0 同样只打印并返回；合并循环上限 MAX_ORDER。
 ````
 
 ### 3.2 生成测试的 prompt
 
 ````markdown
-<!-- 待吕鹏哲填写 -->
+[PROMPT]
+**任务**：为 Buddy System 设计并实现内核态测试，新建 kern/mm/buddy_test.c 与 kern/mm/buddy_test.h，
+并在 kern_init() 的 pmm_init() 之后调用 buddy_test()。
+**操作要求**：只通过黑盒接口 alloc_pages/free_pages/nr_free_pages 与只读 buddy_check() 验证，
+不修改 Buddy 分配逻辑；单个用例失败只 cprintf 打印并计数，绝不 panic；
+使用 cprintf 输出 PASS/FAIL；最终返回失败用例数。
+**输出要求**：直接改文件；说明每个用例覆盖的核心行为与边界；给出运行命令与预期输出。
+
+[RELY]
+// 黑盒接口（kern/mm/pmm.h）
+struct Page *alloc_pages(size_t n);  void free_pages(struct Page *base, size_t n);
+size_t nr_free_pages(void);
+// 只读不变量钩子
+int buddy_check(void);               // 返回失败数，0 表示内部不变量全部成立
+// 输出
+cprintf(...)                         // libs/stdio.h
+// 入口门控：buddy_check() 依赖 buddy 初始化后的 free_list；当 pmm_manager != &buddy_pmm_manager
+// 时（如提交态 best_fit）free_list 是零初始化，直接调用会越界，故 buddy_test() 需先判断再运行。
+
+[GUARANTEE]
+必须实现（函数名与签名固定，缺一不可）：
+```c
+int buddy_test(void);
+static int test_init_capacity(void);
+static int test_basic_alloc_free(void);
+static int test_non_power_of_two(void);
+static int test_split(void);
+static int test_merge_orders(void);
+static int test_fragmentation_exhaustion(void);
+static int test_boundary_invalid(void);
+static int test_random_stress(void);
+static int check_invariants(const char *case_name);
+static unsigned int lcg_next(unsigned int *seed);
+```
+
+[SPECIFICATION]
+**总约定**：buddy_test() 顺序跑 8 个用例；每个用例记录 before = nr_free_pages()，并在用例前后各调一次
+buddy_check()；返回失败用例数（0 表示全过），最后打印 "X/Y passed, Z failed"。
+**LCG**：lcg_next 必须实现 `*seed = (*seed) * 1103515245u + 12345u`，禁止依赖 libc/rand。
+**随机压力 Case**：用 LCG 交替生成分配/释放与大小，每次操作后满足
+`nr_free_pages() + 已分配实际页数 == before`；周期性检查分配区间不重叠并调用 buddy_check()。
+**非法操作 Case**：alloc_pages(0)、alloc 超过空闲页数、alloc 超过 MAX_ORDER、free(NULL)、
+双重释放、释放非块头页、释放 n 与记录不一致——均须安全返回且计数不变。
 ````
 
 ### 3.3 测试覆盖说明
 
-<!-- 待吕鹏哲填写：覆盖了哪些核心行为与边界情况、为什么这些测试能有效检验实现 -->
+8 个用例按“基础 → 分裂/合并 → 规模压力 → 非法边界 → 随机”分层，每一层都用
+`nr_free_pages()` 的**计数守恒**与 `buddy_check()` 的**只读不变量**双保险验证：
+
+| 用例 | 覆盖的核心行为 / 边界 |
+|---|---|
+| `test_init_capacity` | 初始化后空闲页数非零、`buddy_check()` 通过（基线） |
+| `test_basic_alloc_free` | 1/2/4/8 页分配的**块首按 2^order 对齐**、释放后计数恢复到 before |
+| `test_non_power_of_two` | 3/5/7/9 等非 2 幂请求向上取整到 `2^ceil_log2(n)`，块首仍按取整后的阶对齐 |
+| `test_split` | 大块分配引发多级分裂后，各已分配区间**两两不重叠**，全部释放计数恢复 |
+| `test_merge_orders` | 主动构造 buddy 对（alloc 16 → free → alloc 8×2）验证**伙伴合并**；再混入不同 order 的相邻块验证**不误合并** |
+| `test_fragmentation_exhaustion` | 连续分配小块直到失败（打满记录表）→ 确认失败那次不改变计数；再交错分配/释放制造碎片，周期性核验计数守恒 |
+| `test_boundary_invalid` | `alloc(0)`、超量/超 MAX_ORDER、`free(NULL)`、双重释放、释放非块头、n 与记录不一致——全部安全返回且计数不变 |
+| `test_random_stress` | LCG 随机 2000 轮分配/释放，`O(1)` 增量维护已分配页数做计数守恒，周期抽查不重叠 + `buddy_check()` |
+
+这些测试之所以有效：Buddy 的核心不变量只有两条——**块首按 2^order 对齐**与**伙伴合并/分裂后计数守恒**。
+前者由 `buddy_check()` 逐链表检查（范围、对齐、无重复、无环），后者由每个用例的
+`before == after` 与随机压力用例的每步增量守恒直接约束；非法释放不改状态则由
+`buddy_free_pages` 的“记录不匹配即返回”契约单独覆盖。所有检查都是**黑盒 + 只读**，
+不依赖实现细节，因此能真实检验一个“换了实现也要满足同契约”的 Buddy 分配器。
 
 ---
 
