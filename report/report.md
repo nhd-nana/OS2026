@@ -621,7 +621,48 @@ kernel panic at kern/mm/buddy_pmm.c:...:
 
 **负责人：** 2412133-吕鹏哲
 
-<!-- 待吕鹏哲填写 -->
+核心结论：**OS 从不"猜"内存大小，而是"交接"**——由最接近硬件的固件/引导器在内核运行前完成探测，
+把结果编码成某种标准数据结构、放进约定的寄存器或内存位置交给内核；内核只负责**解析**，不做**探测**。
+本实验走的正是 RISC-V 生态的标准路径：**设备树（Device Tree，DTB）**。
+
+#### 本实验的完整链路
+
+1. **固件侧交接**：OpenSBI（机器态固件）启动内核时遵循 RISC-V SBI 引导约定，把
+   `a0 = hartid`、`a1 = DTB 物理地址` 传给 `kern_entry`；[entry.S:6-13](../code/kern/init/entry.S#L6-L13)
+   把二者存入全局量 `boot_hartid` / `boot_dtb`。
+2. **解析侧**：`dtb_init()` 把 `boot_dtb + PHYSICAL_MEMORY_OFFSET` 转成虚拟地址，校验 FDT 魔数
+   `0xd00dfeed`，遍历 FDT 节点树，在 `/memory` 节点的 `reg` 属性里读出两个大端 64 位值
+   `base`、`size`，缓存到 `memory_base` / `memory_size`（[dtb.c](../code/kern/driver/dtb.c)）。
+3. **消费侧**：`page_init()` 用 `get_memory_base()` / `get_memory_size()` 拿到范围，据此算 `npage`、
+   建 `struct Page` 描述符数组、排除占用后注册空闲区。
+
+一个容易被忽略的前提：Makefile 里 `qemu` 必须用 `-kernel $(UCOREIMG)` 而非 `-device loader`——
+只有 `-kernel` 才会让 OpenSBI 把 DTB 地址放进 `a1`，否则 `boot_dtb == 0`，`dtb_init()` 直接返回、
+`page_init()` 拿不到任何内存信息（`panic`）。
+
+#### 为什么 OS 不能预知
+
+同一份内核镜像要跑在内存容量不同的机器上，RAM 的条数/大小是**可变硬件配置**而非编译期常量，
+因此必须有一个"发现"环节，且发现者必须是最接近硬件的固件——它能在 OS 之前通过内存控制器、
+内存条 SPD EEPROM、板级配置等方式得知真实布局，再以标准格式转述给内核。
+
+#### 各平台的同类机制
+
+| 平台 | 交接机制 | 探测者 |
+|---|---|---|
+| x86 传统 | BIOS `INT 15h E820`，返回"地址区间 + 类型"的内存 map | BIOS |
+| x86/UEFI | ACPI `SRAT`/`E820` 表、UEFI `GetMemoryMap()` | UEFI 固件 |
+| ARM 传统 | ATags（引导器传给内核的标签列表） | Bootloader |
+| ARM/RISC-V 现代 | Device Tree（DTB），ARM 放 `r2`、RISC-V 放 `a1` | Bootloader/固件 |
+| 多引导 | Multiboot info 结构中的 mmap | GRUB 等引导器 |
+| 更底层 | 读内存条 SPD EEPROM / 内存控制器寄存器 | 固件 |
+
+#### 共性提炼
+
+所有这些机制都可拆成两步：**探测**（固件/引导器在 OS 之前完成，拿到真实布局）与
+**交接**（把结果编码成 E820 / ACPI / DTB / Multiboot 等标准格式，通过寄存器或内存指针传给内核）。
+OS 侧永远是"解析"而非"探测"——这正是本实验 `dtb_init()`（解析硬件描述）与
+`page_init()`（据描述建管理结构）的分工边界，也是"OS 无法预知内存"这一命题的通用解法。
 
 ---
 
