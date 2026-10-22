@@ -356,7 +356,7 @@ buddy_check()；返回失败用例数（0 表示全过），最后打印 "X/Y pa
 
 ### 4.3 测试覆盖说明
 
-当前自测覆盖同大小对象分配、地址不重复、释放后复用和链表恢复；实现还覆盖零大小及超过一页请求返回 NULL，位图用于检测重复释放。`make qemu` 应输出 `slub_test: allocation, reuse and free passed`。
+当前自测覆盖零大小、`SIZE_MAX`、超过一页请求失败，同大小对象地址不重复，释放后复用，超过单个 4KB slab 容量后继续分配，以及非法指针和重复释放不破坏状态。`make qemu` 应输出 `slub_test: allocation, reuse, bounds, exhaustion and invalid-free checks passed`。空 slab 不归还页是本实验的明确简化。
 
 ---
 

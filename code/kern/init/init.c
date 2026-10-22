@@ -42,6 +42,7 @@ int kern_init(void) {
     pmm_init();  // init physical memory management
 
     buddy_test();  // lab2: Buddy System 黑盒测试
+    slub_init();
     slub_check();
 
     /* do nothing */
