@@ -607,11 +607,17 @@ kernel panic at kern/mm/buddy_pmm.c:...:
 
 SLUB 位于页级物理内存分配器之上。每个 slab 由 `alloc_page()` 提供一个 4KB 页面，再按 8 字节对齐后的对象大小切分为多个槽位。空闲槽位通过槽位自身保存的 next 指针组成空闲链表，位图记录已分配槽位。
 
-**功能与接口清单：** `slub_init()` 清空静态 slab 元数据；`slub_alloc(size)` 分配对象，拒绝零大小、超过一页和整数溢出的请求；`slub_free(obj)` 释放对象，对非法指针和重复释放只报告并保持状态不变；`slub_check()` 使用公开接口验证边界、分配、释放、复用和异常释放。
+#### 功能描述与接口清单
 
-**最终提示词：** 在当前 uCore Lab2 中实现不替换全局 `pmm_manager` 的简化 SLUB。基于 `alloc_page()` 为每种对齐后的对象大小申请 4KB slab，用页内空闲链表管理槽位、静态元数据和位图跟踪分配状态。提供 `slub_init`、`slub_alloc`、`slub_free`、`slub_check`；拒绝零大小、超过一页和溢出请求；非法指针及重复释放不得破坏链表或导致 panic。代码需适配 `-nostdinc` 环境。测试覆盖边界请求、对象唯一性、释放复用、用尽当前 slab 后继续分配，以及异常释放，并通过 `cprintf` 汇报结果。
+`slub_init()` 清空静态 slab 元数据；`slub_alloc(size)` 分配对象，拒绝零大小、超过一页和整数溢出的请求；`slub_free(obj)` 释放对象，对非法指针和重复释放只报告并保持状态不变；`slub_check()` 使用公开接口验证边界、分配、释放、复用和异常释放。
 
-**实现迭代过程：** 初版把多个条件语句写在同一行，`-Werror=misleading-indentation` 直接使编译失败，随后拆成独立语句。验收时发现 `align_up(SIZE_MAX)` 回绕为 0，导致 `new_slab(0)` 除零；修复为对齐前先检查 `size > PGSIZE`，并补充边界测试。原位图只有 64 个 word，无法覆盖一页中的全部小对象，改为按页最大槽位数计算容量。
+#### 最终提示词
+
+在当前 uCore Lab2 中实现不替换全局 `pmm_manager` 的简化 SLUB。基于 `alloc_page()` 为每种对齐后的对象大小申请 4KB slab，用页内空闲链表管理槽位、静态元数据和位图跟踪分配状态。提供 `slub_init`、`slub_alloc`、`slub_free`、`slub_check`；拒绝零大小、超过一页和溢出请求；非法指针及重复释放不得破坏链表或导致 panic。代码需适配 `-nostdinc` 环境。测试覆盖边界请求、对象唯一性、释放复用、用尽当前 slab 后继续分配，以及异常释放，并通过 `cprintf` 汇报结果。
+
+#### 实现迭代过程
+
+初版把多个条件语句写在同一行，`-Werror=misleading-indentation` 直接使编译失败，随后拆成独立语句。验收时发现 `align_up(SIZE_MAX)` 回绕为 0，导致 `new_slab(0)` 除零；修复为对齐前先检查 `size > PGSIZE`，并补充边界测试。原位图只有 64 个 word，无法覆盖一页中的全部小对象，改为按页最大槽位数计算容量。
 
 **简化点：** 空 slab 暂不归还给页分配器；静态元数据限制 slab 数量；测试在启动阶段运行，因此不会并发访问。空闲槽位复用采用后进先出链表。
 
@@ -785,8 +791,8 @@ buddy_test: 8/8 passed, 0 failed
 
 #### 5.3.2 SLUB（钟一成）
 
-在默认 `best_fit_pmm_manager` 不变的情况下，启动流程调用 `slub_check()`，验证
-SLUB 能从页分配器取得 slab、分配两个同大小对象、释放对象并复用已释放槽位。
+在默认 `best_fit_pmm_manager` 不变的情况下，启动流程调用 `slub_init()` 和 `slub_check()`，验证
+SLUB 的边界请求、对象地址唯一性、释放后复用、耗尽当前 slab 后申请新 slab，以及非法指针和重复释放处理。
 实际输出为：
 
 ```
@@ -797,7 +803,7 @@ slub_test: allocation, reuse, bounds, exhaustion and invalid-free checks passed
 
 ![SLUB 分配、释放与复用测试](./images/lab2_slub.png)
 
-实现还对 `size == 0` 和对齐后大于 `PGSIZE` 的请求返回 `NULL`；释放路径通过位图
+实现还对 `size == 0`、`SIZE_MAX` 和大于 `PGSIZE` 的请求返回 `NULL`；释放路径通过位图
 检查槽位是否已分配，避免重复释放静默破坏空闲链表。`make grade` 的自动测试只覆盖
 Page Init 与 Best-Fit，因此 SLUB 使用独立的 `make qemu` 输出作为验收证据。
 
