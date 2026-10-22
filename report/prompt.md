@@ -345,18 +345,18 @@ buddy_check()；返回失败用例数（0 表示全过），最后打印 "X/Y pa
 ### 4.1 生成实现的 prompt
 
 ````markdown
-<!-- 待钟一成填写 -->
+请在当前 uCore Lab2 中设计不替换全局 pmm_manager 的简化 SLUB。建立在 alloc_page/free_page 之上，为每种对象大小申请 4KB slab，按 8 字节对齐切分对象，用空闲链表分配释放，并用静态元数据避免 malloc。提供 slub_init、slub_alloc、slub_free、slub_check；处理 size=0、超过一页、耗尽、非法释放和重复释放；不得修改 page_init、Best-Fit、Buddy 或 make grade。代码必须适配 nostdinc 内核环境，并说明地址转换和测试设计。
 ````
 
 ### 4.2 生成测试的 prompt
 
 ````markdown
-<!-- 待钟一成填写 -->
+请为简化 SLUB 设计黑盒自测，覆盖零大小和超过一页请求失败、同大小对象地址不同、释放后复用、多个对象释放后再分配、槽位耗尽时申请新 slab，以及非法指针和重复释放。测试只使用公开接口，输出通过 cprintf 观察，并说明每个用例验证的不变量。
 ````
 
 ### 4.3 测试覆盖说明
 
-<!-- 待钟一成填写 -->
+当前自测覆盖同大小对象分配、地址不重复、释放后复用和链表恢复；实现还覆盖零大小及超过一页请求返回 NULL，位图用于检测重复释放。`make qemu` 应输出 `slub_test: allocation, reuse and free passed`。
 
 ---
 

@@ -605,7 +605,7 @@ kernel panic at kern/mm/buddy_pmm.c:...:
 
 **负责人：** 2412679-钟一成
 
-<!-- 待钟一成填写：模块功能描述 / 最终提示词（两份）/ 实现迭代过程 / 测试覆盖说明 -->
+SLUB 位于页级物理内存分配器之上。每个 slab 由 `alloc_page()` 提供一个 4KB 页面，再按 8 字节对齐后的对象大小切分为多个槽位。空闲槽位通过槽位自身保存的 next 指针组成空闲链表，位图记录已分配槽位；`slub_alloc()` 取出对象，`slub_free()` 放回并检查重复释放。零大小或超过一页的请求返回 NULL。启动时 `slub_check()` 验证分配、释放和地址复用，输出为 `slub_test: allocation, reuse and free passed`。编译时 `-Werror=misleading-indentation` 暴露压缩条件语句的歧义，拆分后通过编译。
 
 ---
 
@@ -613,7 +613,7 @@ kernel panic at kern/mm/buddy_pmm.c:...:
 
 **负责人：** 2412679-钟一成
 
-<!-- 待钟一成填写 -->
+First-Fit 在按地址升序的空闲连续页链表中，从头寻找第一个 `property >= n` 的块。恰好满足时摘链；更大块从块尾切出请求页，剩余部分留在链表。释放时按地址插回，并与相邻前后空闲块合并。优点是简单；缺点是容易产生外部碎片，最坏查找时间为 O(n)。可用分离空闲链表或大小索引降低查找成本，设置最小切分阈值减少残块，并在同等大小块中优先选择邻接块。
 
 ---
 
@@ -736,7 +736,31 @@ buddy_test: 8/8 passed, 0 failed
 
 #### 5.3.2 SLUB（钟一成）
 
-<!-- 待钟一成补充 SLUB 的测试输出与截图 -->
+在默认 `best_fit_pmm_manager` 不变的情况下，启动流程调用 `slub_check()`，验证
+SLUB 能从页分配器取得 slab、分配两个同大小对象、释放对象并复用已释放槽位。
+实际输出为：
+
+```
+memory management: best_fit_pmm_manager
+check_alloc_page() succeeded!
+slub_test: allocation, reuse and free passed
+```
+
+![SLUB 分配、释放与复用测试](./images/lab2_slub.png)
+
+实现还对 `size == 0` 和对齐后大于 `PGSIZE` 的请求返回 `NULL`；释放路径通过位图
+检查槽位是否已分配，避免重复释放静默破坏空闲链表。`make grade` 的自动测试只覆盖
+Page Init 与 Best-Fit，因此 SLUB 使用独立的 `make qemu` 输出作为验收证据。
+
+自动评分结果（本仓库脚本的实际输出格式）为：
+
+```
+-check page init:                          OK
+-check best fit:                           OK
+Total Score: 20/20
+```
+
+![Lab2 自动评分结果](./images/lab2_grade_user.png)
 
 ---
 

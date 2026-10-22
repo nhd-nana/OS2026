@@ -5,6 +5,7 @@
 #include <string.h>
 #include <dtb.h>
 #include <buddy_test.h>
+#include <slub.h>
 
 int kern_init(void) __attribute__((noreturn));
 void grade_backtrace(void);
@@ -41,9 +42,9 @@ int kern_init(void) {
     pmm_init();  // init physical memory management
 
     buddy_test();  // lab2: Buddy System 黑盒测试
+    slub_check();
 
     /* do nothing */
     while (1)
         ;
 }
-
