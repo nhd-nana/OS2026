@@ -5,13 +5,14 @@
 # 用法（在本目录下执行）：
 #   ./demo.sh run       清理后完整编译并运行内核（QEMU 前台，Ctrl+A 松手再按 X 退出）
 #   ./demo.sh grade     运行自动评分（注入测试 + grade.sh），显示两个 PASS 与总分
-#   ./demo.sh buddy     以 PMM=buddy 重编译，跑 8 个黑盒用例，结束后自动恢复默认构建
+#   ./demo.sh buddy     以 PMM=buddy 增量重编（只重编 pmm.c），跑 8 个黑盒用例，结束后自动恢复默认
 #   ./demo.sh slub      运行默认构建，提取 SLUB 自测输出
 #   ./demo.sh all       依次执行 grade + buddy + slub（约 1 分钟，用于快速自检）
 #   ./demo.sh help      显示本帮助
 #
 # 说明：
-#   - 仓库源码不会被修改；buddy 演示通过 make PMM=buddy 加编译宏切换分配器，跑完自动重编回默认。
+#   - 仓库源码不会被修改；buddy 演示通过 make PMM=buddy 加编译宏切换分配器，
+#     Makefile 用 stamp 文件感知 PMM 变化，只重编 pmm.c，跑完自动重编回默认。
 #   - QEMU 版本由 Makefile 自动选择：优先 $HOME/opt/qemu-4.1.1，缺失才退回 PATH。
 set -u
 
@@ -38,11 +39,24 @@ build_verbose() {
 }
 
 run_kernel() {
-    # 内核是死循环，用 timeout 发 SIGTERM 结束（QEMU 会正常退出，不会打印 Killed）；
-    # 输出落盘而不是接管道，避免管道被挂住
-    timeout "$RUN_TIMEOUT" "$QEMU_BIN" \
+    # $1=日志路径；$2=出现即提前结束的正则（可选，省去等满超时）
+    # 内核是死循环，只能靠信号结束；输出落盘而不是接管道，避免管道被挂住
+    local log="$1" pattern="${2:-}"
+    timeout --signal=KILL "$RUN_TIMEOUT" "$QEMU_BIN" \
         -machine virt -nographic -bios default -kernel bin/ucore.img \
-        </dev/null >"$1" 2>&1
+        </dev/null >"$log" 2>&1 &
+    local pid=$!
+    if [ -n "$pattern" ]; then
+        local i=0
+        while [ "$i" -lt 200 ] && kill -0 "$pid" 2>/dev/null; do
+            grep -aq "$pattern" "$log" 2>/dev/null && break
+            sleep 0.1
+            i=$((i + 1))
+        done
+        sleep 0.3          # 留点时间让尾部输出落盘
+        kill "$pid" 2>/dev/null
+    fi
+    wait "$pid" 2>/dev/null
     return 0
 }
 
@@ -90,7 +104,7 @@ cmd_slub() {
         make >/dev/null 2>&1 || { warn "编译失败"; exit 1; }
     fi
     info "运行默认构建（SLUB 自测在 kern_init() 里自动执行）..."
-    run_kernel /tmp/lab2_demo_slub.log
+    run_kernel /tmp/lab2_demo_slub.log "slub_test: .*checks passed"
     echo
     grep -a -E "memory management|check_alloc_page|buddy_test:|slub" /tmp/lab2_demo_slub.log || warn "未捕获到预期输出"
     echo
@@ -104,10 +118,9 @@ cmd_slub() {
 
 cmd_buddy() {
     expect_tools
-    info "以 PMM=buddy 重新编译（源码不动，只加 -DUSE_BUDDY_PMM）..."
-    make clean >/dev/null 2>&1
+    info "以 PMM=buddy 增量重编（只重编 pmm.c，源码不动）..."
     make PMM=buddy >/dev/null 2>&1 || { warn "Buddy 构建失败"; return 1; }
-    run_kernel /tmp/lab2_demo_buddy.log
+    run_kernel /tmp/lab2_demo_buddy.log "buddy_test: .*passed"
 
     echo
     grep -a -E "memory management|buddy_pmm_check|check_alloc_page|buddy_test" /tmp/lab2_demo_buddy.log
@@ -120,7 +133,6 @@ cmd_buddy() {
     fi
 
     info "恢复默认构建（Best-Fit）..."
-    make clean >/dev/null 2>&1
     make >/dev/null 2>&1 || warn "恢复默认构建失败，请手动执行 make"
 }
 

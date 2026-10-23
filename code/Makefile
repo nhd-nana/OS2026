@@ -122,6 +122,11 @@ ifeq ($(PMM),buddy)
 KCFLAGS		+= -DUSE_BUDDY_PMM
 endif
 
+# PMM 只影响 pmm.c 的编译结果，make 无法感知命令行变量变化，故用 stamp 文件强制其重编
+PMM_STAMP	:= $(OBJDIR)/.pmm
+$(shell mkdir -p $(OBJDIR); printf '%s' '$(PMM)' | cmp -s - $(PMM_STAMP) || printf '%s' '$(PMM)' > $(PMM_STAMP))
+$(OBJDIR)/kern/mm/pmm.o: $(PMM_STAMP)
+
 ifeq ($(MAKECMDGOALS),test)
 $(call add_files_cc2,$(call listf_cc,$(KSRCDIR)),kernel,$(KCFLAGS))
 else
