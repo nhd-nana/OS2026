@@ -59,6 +59,10 @@ cmd_run() {
    phys memory / npage / free pages         ← page_init 的三项关键结果
    check_alloc_page() succeeded!            ← 分配/释放自检通过
    satp virtual/physical address            ← 虚实映射生效
+ 以下三行不是报错，是预期输出：
+   buddy_test: ... not buddy; skip ...      ← 默认非 Buddy，测试自我保护跳过
+   slub_free: invalid or duplicate ...      ← SLUB 非法释放用例的正常输出
+   slub_test: ... checks passed             ← SLUB 自测通过
  退出：Ctrl+A 松手，再按 X
 ======================================================================
 
@@ -90,8 +94,9 @@ cmd_slub() {
     echo
     grep -a -E "memory management|check_alloc_page|buddy_test:|slub" /tmp/lab2_demo_slub.log || warn "未捕获到预期输出"
     echo
+    info "说明：'buddy_test: ... not buddy; skip' 是默认非 Buddy 时的自我保护；'slub_free: ...' 是非法释放用例的预期输出"
     if grep -aq "slub_test: allocation, reuse, bounds, exhaustion and invalid-free checks passed" /tmp/lab2_demo_slub.log; then
-        ok "SLUB 自测通过（前两行 slub_free 提示是非法释放用例的预期输出）"
+        ok "SLUB 自测通过"
     else
         warn "SLUB 自测未通过"
     fi
