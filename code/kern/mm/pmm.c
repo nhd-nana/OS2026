@@ -35,7 +35,11 @@ static void check_alloc_page(void);
 
 // init_pmm_manager - initialize a pmm_manager instance
 static void init_pmm_manager(void) {
+#ifdef USE_BUDDY_PMM
+    pmm_manager = &buddy_pmm_manager;     // make PMM=buddy
+#else
     pmm_manager = &best_fit_pmm_manager;  // lab2: 切换为 Best-Fit 分配器
+#endif
     cprintf("memory management: %s\n", pmm_manager->name);
     pmm_manager->init();
 }

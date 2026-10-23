@@ -5,13 +5,13 @@
 # 用法（在本目录下执行）：
 #   ./demo.sh run       清理后完整编译并运行内核（QEMU 前台，Ctrl+A 松手再按 X 退出）
 #   ./demo.sh grade     运行自动评分（注入测试 + grade.sh），显示两个 PASS 与总分
-#   ./demo.sh buddy     在临时副本里把分配器切到 Buddy，跑 8 个黑盒用例（不改动仓库）
+#   ./demo.sh buddy     以 PMM=buddy 重编译，跑 8 个黑盒用例，结束后自动恢复默认构建
 #   ./demo.sh slub      运行默认构建，提取 SLUB 自测输出
 #   ./demo.sh all       依次执行 grade + buddy + slub（约 1 分钟，用于快速自检）
 #   ./demo.sh help      显示本帮助
 #
 # 说明：
-#   - 仓库代码不会被修改；buddy 演示在 mktemp 目录里切 pmm_manager，跑完即删。
+#   - 仓库源码不会被修改；buddy 演示通过 make PMM=buddy 加编译宏切换分配器，跑完自动重编回默认。
 #   - QEMU 版本由 Makefile 自动选择：优先 $HOME/opt/qemu-4.1.1，缺失才退回 PATH。
 set -u
 
@@ -99,33 +99,24 @@ cmd_slub() {
 
 cmd_buddy() {
     expect_tools
-    local tmp
-    tmp="$(mktemp -d /tmp/lab2_buddy.XXXXXX)"
-    trap 'rm -rf "$tmp"' RETURN
-    info "复制到临时目录：$tmp（仓库不会被改动）"
-    cp -r . "$tmp/src" || { warn "复制失败"; return 1; }
-    cd "$tmp/src" || return 1
-    rm -rf obj bin
-
-    sed -i 's/pmm_manager = &best_fit_pmm_manager;/pmm_manager = \&buddy_pmm_manager;/' kern/mm/pmm.c
-    if ! grep -q "buddy_pmm_manager;" kern/mm/pmm.c; then
-        warn "切换失败：pmm.c 里没找到 best_fit_pmm_manager 赋值"
-        cd - >/dev/null; return 1
-    fi
-
-    make >/dev/null 2>&1 || { warn "Buddy 构建失败"; cd - >/dev/null; return 1; }
-    run_kernel "$tmp/buddy.log"
+    info "以 PMM=buddy 重新编译（源码不动，只加 -DUSE_BUDDY_PMM）..."
+    make clean >/dev/null 2>&1
+    make PMM=buddy >/dev/null 2>&1 || { warn "Buddy 构建失败"; return 1; }
+    run_kernel /tmp/lab2_demo_buddy.log
 
     echo
-    grep -a -E "memory management|buddy_pmm_check|check_alloc_page|buddy_test" "$tmp/buddy.log"
+    grep -a -E "memory management|buddy_pmm_check|check_alloc_page|buddy_test" /tmp/lab2_demo_buddy.log
     echo
-    if grep -aq "8/8 passed, 0 failed" "$tmp/buddy.log"; then
+    if grep -aq "8/8 passed, 0 failed" /tmp/lab2_demo_buddy.log; then
         ok "Buddy 8 个用例全部通过"
         info "说明：'no matching allocation record' 等提示来自非法释放用例，属预期"
     else
         warn "Buddy 用例未全部通过"
     fi
-    cd - >/dev/null
+
+    info "恢复默认构建（Best-Fit）..."
+    make clean >/dev/null 2>&1
+    make >/dev/null 2>&1 || warn "恢复默认构建失败，请手动执行 make"
 }
 
 cmd_help() {

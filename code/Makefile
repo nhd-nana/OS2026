@@ -116,6 +116,12 @@ KSRCDIR		+= kern/init \
 
 KCFLAGS		+= $(addprefix -I,$(KINCLUDE))
 
+# 选择物理内存分配器：默认 best（Best-Fit），make PMM=buddy 切换为 Buddy System
+PMM		?= best
+ifeq ($(PMM),buddy)
+KCFLAGS		+= -DUSE_BUDDY_PMM
+endif
+
 ifeq ($(MAKECMDGOALS),test)
 $(call add_files_cc2,$(call listf_cc,$(KSRCDIR)),kernel,$(KCFLAGS))
 else
