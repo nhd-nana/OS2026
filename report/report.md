@@ -2,19 +2,19 @@
 
 ## 实验基本信息
 
-| 项目 | 内容 |
-|------|------|
-| **实验名称** | Lab 2: 物理内存和页表 |
+| 项目               | 内容                                                 |
+| ------------------ | ---------------------------------------------------- |
+| **实验名称** | Lab 2: 物理内存和页表                                |
 | **小组成员** | 2412799-葛熠（队长）、2412133-吕鹏哲、2412679-钟一成 |
-| **完成日期** | 2026-10-20 |
+| **完成日期** | 2026-10-20                                           |
 
 ### 小组分工
 
-| 成员 | 负责的练习/模块 |
-|------|----------------|
-| 2412799-葛熠 | 任务 1 `page_init`；任务 2 Best-Fit；环境与构建（QEMU 4.1.1 编译与适配）；报告统稿 |
-| 2412133-吕鹏哲 | 任务 3 Buddy System（实现 + 测试 + 两份 prompt）；Challenge 思考题 |
-| 2412679-钟一成 | 任务 4 SLUB（实现 + 测试 + 两份 prompt）；First-Fit 分析思考题 |
+| 成员           | 负责的练习/模块                                                                      |
+| -------------- | ------------------------------------------------------------------------------------ |
+| 2412799-葛熠   | 任务 1 `page_init`；任务 2 Best-Fit；环境与构建（QEMU 4.1.1 编译与适配）；报告统稿 |
+| 2412133-吕鹏哲 | 任务 3 Buddy System（实现 + 测试 + 两份 prompt）；Challenge 思考题                   |
+| 2412679-钟一成 | 任务 4 SLUB（实现 + 测试 + 两份 prompt）；First-Fit 分析思考题                       |
 
 **报告分工**：各人先提交自己负责模块的实现说明、提示词与测试证据，由葛熠按模板统稿并交叉复核技术描述。
 
@@ -31,20 +31,20 @@
 
 ## 二、实验环境
 
-| 成员 | AI 编程工具 | 底层模型 | 备注 |
-|------|------------|---------|------|
-| 2412799-葛熠 | VS Code + Copilot（Agent 模式） | DeepSeek V4.1 Flash | 改代码、跑 WSL 命令、提交推送 |
-| 2412133-吕鹏哲 | VS Code + DeepSeek | DeepSeek V4 Pro | |
-| 2412679-钟一成 | Codex（ChatGPT，Agent 模式） | GPT-5 | 辅助代码阅读、命令执行和实验分析 |
+| 成员           | AI 编程工具                     | 底层模型            | 备注                             |
+| -------------- | ------------------------------- | ------------------- | -------------------------------- |
+| 2412799-葛熠   | VS Code + Copilot（Agent 模式） | DeepSeek V4.1 Flash | 改代码、跑 WSL 命令、提交推送    |
+| 2412133-吕鹏哲 | VS Code + DeepSeek              | DeepSeek V4 Pro     |                                  |
+| 2412679-钟一成 | Codex（ChatGPT，Agent 模式）    | GPT-5               | 辅助代码阅读、命令执行和实验分析 |
 
 **运行环境**
 
-| 项 | 值 |
-|---|---|
-| 宿主 | Windows 11 + WSL2 `Ubuntu2204` |
+| 项         | 值                                                                                         |
+| ---------- | ------------------------------------------------------------------------------------------ |
+| 宿主       | Windows 11 + WSL2 `Ubuntu2204`                                                           |
 | 交叉工具链 | `riscv64-unknown-elf-gcc/ld/objcopy/objdump/nm/gdb`（`/opt/riscv-elf-toolchains/bin`） |
-| 模拟器 | **QEMU 4.1.1（本地源码编译，`--enable-debug`）** + OpenSBI v0.4 |
-| 构建 | `make`；评分 `make grade` |
+| 模拟器     | **QEMU 4.1.1（本地源码编译，`--enable-debug`）** + OpenSBI v0.4                    |
+| 构建       | `make`；评分 `make grade`                                                              |
 
 > 为什么不用系统自带的 QEMU 7.0：lab2 的 `entry.S` 在**物理地址**上执行 `csrw satp` 打开 Sv39，
 > 而页表只映射了高地址 `0xFFFFFFFFC0000000` 以上，物理 PC 在新页表中没有映射。
@@ -84,26 +84,20 @@ alloc_pages() / free_pages()   上层此后只管调这两个接口
 1. **先确定地址口径**（`va_pa_offset`）
    内核在虚拟地址空间运行，而设备树、`end`、`struct Page *` 分属不同口径，必须先钉死 `va_pa_offset = PHYSICAL_MEMORY_OFFSET`，
    之后才有 `PADDR`/`KADDR` 的统一换算。*为什么先做*：后面每一步都依赖它，弄错则整体偏移。
-
 2. **发现物理内存**（`get_memory_base()` / `get_memory_size()`）
    由 `dtb_init()` 从设备树读取，`page_init()` 只做校验与上界截断。*为什么第二步*：范围决定了 `npage` 与描述符数组大小。
-
 3. **建立描述符数组**（`pages`）
    从 `ROUNDUP(end, PGSIZE)` 开始，连续放置 `(npage - nbase)` 个 `struct Page`，并全部先标记 `PG_reserved`。
    *为什么第三步*：必须先有"页面登记簿"，才能谈哪页空闲。
-
 4. **排除已占用区域**
    OpenSBI（`0x80000000`–`0x80200000`）、内核镜像、描述符数组自身都不能进空闲区；
    实现上采用"先全标 Reserved、再从描述符数组末尾开始解封"的写法，天然排除了前两者。
-
 5. **把空闲页交给分配器**（`init_memmap()`）
    传入的页必须已 `PageReserved`（`default_init_memmap` 里有 `assert`），且不足一页时不调用。
    *为什么最后*：这是"登记簿"交给"分配策略"的交接点，也是 `check_alloc_page()` 的前提。
-
 6. **换一种分配策略**（Best-Fit）
    框架把分配算法抽象成 `struct pmm_manager` 的 6 个函数指针，所以 Best-Fit 只需实现同一组接口并注册，
    再让 `init_pmm_manager()` 指向它——**不改上层任何调用代码**。
-
 7. **向两个方向延伸**：Buddy System（页级、2 的幂次块、伙伴合并）与 SLUB（在页级之上做任意大小对象分配）。
 
 一句话概括顺序：**定地址口径 → 找内存 → 建登记簿 → 排除占用 → 交给分配器 → 换策略 → 向上下两层扩展。**
@@ -662,14 +656,14 @@ First-Fit 在按地址升序的空闲连续页链表中，从头寻找第一个 
 
 #### 各平台的同类机制
 
-| 平台 | 交接机制 | 探测者 |
-|---|---|---|
-| x86 传统 | BIOS `INT 15h E820`，返回"地址区间 + 类型"的内存 map | BIOS |
-| x86/UEFI | ACPI `SRAT`/`E820` 表、UEFI `GetMemoryMap()` | UEFI 固件 |
-| ARM 传统 | ATags（引导器传给内核的标签列表） | Bootloader |
-| ARM/RISC-V 现代 | Device Tree（DTB），ARM 放 `r2`、RISC-V 放 `a1` | Bootloader/固件 |
-| 多引导 | Multiboot info 结构中的 mmap | GRUB 等引导器 |
-| 更底层 | 读内存条 SPD EEPROM / 内存控制器寄存器 | 固件 |
+| 平台            | 交接机制                                               | 探测者          |
+| --------------- | ------------------------------------------------------ | --------------- |
+| x86 传统        | BIOS `INT 15h E820`，返回"地址区间 + 类型"的内存 map | BIOS            |
+| x86/UEFI        | ACPI `SRAT`/`E820` 表、UEFI `GetMemoryMap()`     | UEFI 固件       |
+| ARM 传统        | ATags（引导器传给内核的标签列表）                      | Bootloader      |
+| ARM/RISC-V 现代 | Device Tree（DTB），ARM 放 `r2`、RISC-V 放 `a1`    | Bootloader/固件 |
+| 多引导          | Multiboot info 结构中的 mmap                           | GRUB 等引导器   |
+| 更底层          | 读内存条 SPD EEPROM / 内存控制器寄存器                 | 固件            |
 
 #### 共性提炼
 
@@ -694,6 +688,105 @@ OS 侧永远是"解析"而非"探测"——这正是本实验 `dtb_init()`（解
    可在同等大小的候选中优先选与已有空闲块相邻的块。
 4. **无法响应"对齐/连续大块"需求**：若上层需要 2 的幂次或物理连续大块，Best-Fit 会反复切分。
    这正是 Buddy System 的动机——按 2 的幂次维护，伙伴合并判断是 O(1)。
+
+---
+
+### 分支任务：双 GDB 调试页表查询
+
+**目标**：在 QEMU 源码层面观察一次取指的地址翻译过程。一个 gdb（riscv 交叉）通过 gdbstub
+驱动内核执行，另一个 gdb（x86_64）调试 QEMU 进程本身，在 `get_physical_address()` 上下条件断点，
+直接看到页表遍历的每一级。
+
+#### 观察记录
+
+分页未开启时（`satp = 0`），内核入口在物理地址 `0x80200000` 上取指：
+
+```text
+satp = 0x0  priv = 1 (S)  access_type = 2 (取指)
+→ 停在 cpu_helper.c:197 case VM_1_10_MBARE：*physical = addr，等同不翻译
+```
+
+`csrw satp` 之后第一次真正的翻译发生在 `jr` 跳到 `kern_init` 时：
+
+```text
+satp = 0x8000000000080208  (MODE=8, PPN=0x80208)
+基址 base = 0x80208000（根表物理地址）
+第 1 级: idx=0x1ff  pte_addr=0x80208ff8  pte=0x200000cf  ppn=0x80000
+→ vpn=0xffffffffc0200  ptshift=18  →  *physical = 0x80200000
+→ 加页内偏移 0xd6  →  最终物理地址 0x802000d6
+```
+
+**数字自洽**：
+
+- `satp = 0x8000000000080208`：MODE=8（Sv39）、PPN=`0x80208` → 根表 PA `0x80208000`，
+  与内核启动打印的 `satp physical address: 0x0000000080208000` 一致；
+- `VPN2 = 0x1FF` → 根表第 511 项，地址 `0x80208000 + 0x1FF × 8 = 0x80208FF8`；
+- `pte = 0x200000cf` = `(0x80000 << 10) | 0xcf`，正是 `entry.S` 里写死的那一项；
+- `0xcf` 含 R/W/X → 叶子项；`ppn` 低 18 位为 0 → 合法 1 GiB 大页，所以**循环只走 1 级**；
+- 最终 `0x80200000 + 0xd6 = 0x802000d6`，与符号 `entry 0xffffffffc02000d6` 减偏移吻合。
+
+#### QEMU 内部的调用路径
+
+```text
+guest 取指/访存
+  → tb_lookup__cpu_state            (include/exec/tb-lookup.h:43)
+  → tb_htable_lookup                (accel/tcg/cpu-exec.c:339)
+  → get_page_addr_code              (accel/tcg/cputlb.c:1032)
+  → tlb_fill                        (accel/tcg/cputlb.c:878)
+  → riscv_cpu_tlb_fill              (target/riscv/cpu_helper.c:451)
+  → get_physical_address            (target/riscv/cpu_helper.c:155)
+      → for (i = 0; i < levels; i++) 三级查表   (cpu_helper.c:237)
+```
+
+关键分支（均可在 gdb 直接下断点）：
+
+| 行 | 分支 | 含义 |
+|---|---|---|
+| 172 | `mode == PRV_M \|\| !MMU` | M 态或无 MMU：`*physical = addr`，不翻译 |
+| 184 | `base = satp.PPN << 12` | 根表物理地址 |
+| 196 | `case VM_1_10_MBARE` | 分页未开：恒等映射（[1] 命中的就是这里） |
+| 237 | `for (i = 0; i < levels; ...)` | 逐级查表主循环 |
+| 252 | `pte = ldq_phys(cs->as, pte_addr)` | 读 8 字节页表项 |
+| 256 | `if (!(pte & PTE_V))` | 无效项 → `TRANSLATE_FAIL` |
+| 259 | `!(pte & (R\|W\|X))` | 内部项：`base = ppn << 12`，继续下一级 |
+| 277 | `ppn & ((1 << ptshift) - 1)` | 大页 PPN 未按 1 GiB 对齐 → 失败 |
+| 280/284/286 | R/W/X 权限检查 | 读/写/取指权限 |
+| 333–334 | `vpn = addr >> 12; *physical = (ppn \| (vpn & mask)) << 12` | 大页：剩余 VPN 位当页内偏移 |
+
+#### "三个循环在做什么"
+
+源码里只有一个 `for (i = 0; i < levels; i++)`（237 行），循环体做三件事：
+
+1. `idx = (addr >> (12 + ptshift)) & 0x1FF` —— 取当前级的 9 位索引；
+2. `pte_addr = base + idx * 8` —— 算出页表项的物理地址（每项 8 字节）；
+3. `pte = ldq_phys(...)` —— 读页表项，按 V/R/W/X 判断"无效 / 内部项继续 / 叶子项结束"。
+
+`ptshift` 每轮减 9（18 → 9 → 0），对应 VPN[2] → VPN[1] → VPN[0]。我们只看到 1 级，
+因为根表项本身就是 1 GiB 大页叶子项；换成 4 KiB 粒度页表就会看到 3 组输出。
+
+#### QEMU 的 TLB 与真 CPU 的区别
+
+- **真 CPU**：TLB 是硬件并行查找的页表项缓存，带 ASID/VMID 标签，页表修改后靠 `sfence.vma` 失效。
+- **QEMU（TCG）**：TLB 是 `CPUArchState` 里的**软件数组**（`tlb_table`），每项缓存
+  "虚拟页号 → 物理地址增量 + 权限"。生成的代码在访存前先查这个数组（内联进 TB），
+  未命中才调 `tlb_fill`（`cputlb.c:878`）→ `riscv_cpu_tlb_fill` → `get_physical_address`。
+  `sfence.vma` 由 helper 实现，本质是把软件 TLB 置无效。
+- **最大的逻辑区别**：QEMU 除了 TLB 还缓存**翻译后的指令块**（Translation Block, TB）。
+  所以"同一条指令只翻译一次"在 QEMU 里是常态；`csrw satp` 之后如果 TB 还在，QEMU 4.1.1
+  会继续执行旧 TB —— 这正是 lab2 能在 4.1.1 上跑通、而 QEMU 7 会立刻取指 page fault 的原因
+  （7.0 写 satp 时 flush 并重新翻译，物理 PC 在新页表里没有映射）。
+
+#### 用 AI 解决的问题
+
+| 场景 | 提问 | 结论 |
+|---|---|---|
+| 不知在哪个函数下断点 | "RISC-V 的 QEMU 里，虚实地址翻译在哪个函数？TLB miss 后的调用链？" | `get_physical_address` / `riscv_cpu_tlb_fill` / `tlb_fill`，并给出源码文件 |
+| 断点太频繁 | "这个函数每页都调用，怎么只看我要的地址？" | 条件断点 `break ... if addr == 0x...` |
+| gdb 总停在 SIGPIPE | "attach 到 QEMU 后 gdb 老停在 SIGPIPE？" | `handle SIGPIPE nostop noprint` |
+| 不知选哪个地址 | "怎么选一个必然被访问的虚地址？" | 选内核 C 入口 `kern_init`，`jr` 到它必然取指一次 |
+| `next` 不按源码走 | "为什么单步会乱跳？" | 只加 `-g` 没加 `-O0`，改用行号断点 + 打印变量 |
+
+完整操作步骤见 `实验步骤.md` 第 10 节；一键演示 `./demo.sh mmu`。
 
 ---
 
@@ -723,14 +816,14 @@ satp physical address: 0x0000000080205000
 
 ![make qemu 运行结果](./images/lab2_make_qemu.png)
 
-| 输出 | 含义 |
-|---|---|
-| `Physical Memory from DTB` | 物理内存范围来自设备树，而非硬编码 |
-| `memory management: best_fit_pmm_manager` | 分配器已切换为 Best-Fit |
-| `npage: 0x88000` | `0x88000000 >> 12`，页号上界 |
-| `free pages: 0x7cb9` | 排除固件/内核/描述符后的可用页数 |
-| `check_alloc_page() succeeded!` | `pmm_manager->check()` 通过（含 6 个细项） |
-| `satp physical address: 0x80205000` | 引导页表物理地址，说明虚实映射已生效 |
+| 输出                                        | 含义                                         |
+| ------------------------------------------- | -------------------------------------------- |
+| `Physical Memory from DTB`                | 物理内存范围来自设备树，而非硬编码           |
+| `memory management: best_fit_pmm_manager` | 分配器已切换为 Best-Fit                      |
+| `npage: 0x88000`                          | `0x88000000 >> 12`，页号上界               |
+| `free pages: 0x7cb9`                      | 排除固件/内核/描述符后的可用页数             |
+| `check_alloc_page() succeeded!`           | `pmm_manager->check()` 通过（含 6 个细项） |
+| `satp physical address: 0x80205000`       | 引导页表物理地址，说明虚实映射已生效         |
 
 ### 5.2 自动评分（`make grade`）
 
@@ -782,12 +875,12 @@ buddy_test: 8/8 passed, 0 failed
 
 ![buddy_test 运行结果](./images/lab2_buddy.png)
 
-| 输出 | 含义 |
-|---|---|
-| `memory management: buddy_pmm_manager` | 分配器已临时切换为 Buddy（验证完改回 best_fit） |
-| `free pages: 0x7c81` | 可用空闲页总数（= 31873 页，与 best_fit 同量级） |
-| `buddy_pmm_check() succeeded!` | `check` 的 void 适配器通过（不变量 + 分配/非法释放/释放往返自测） |
-| `buddy_test: 8/8 passed, 0 failed` | 8 个黑盒用例全部通过，返回失败数 0 |
+| 输出                                     | 含义                                                                |
+| ---------------------------------------- | ------------------------------------------------------------------- |
+| `memory management: buddy_pmm_manager` | 分配器已临时切换为 Buddy（验证完改回 best_fit）                     |
+| `free pages: 0x7c81`                   | 可用空闲页总数（= 31873 页，与 best_fit 同量级）                    |
+| `buddy_pmm_check() succeeded!`         | `check` 的 void 适配器通过（不变量 + 分配/非法释放/释放往返自测） |
+| `buddy_test: 8/8 passed, 0 failed`     | 8 个黑盒用例全部通过，返回失败数 0                                  |
 
 #### 5.3.2 SLUB（钟一成）
 
@@ -823,16 +916,16 @@ Total Score: 20/20
 
 ### 6.1 本实验知识点与 OS 原理的对应
 
-| 本实验的知识点 | OS 原理中的对应知识点 | 含义、关系与差异 |
-|---|---|---|
-| `va_pa_offset` + Sv39 页表：内核在 `0xFFFFFFFFC0200000` 运行，物理在 `0x80200000` | 地址转换 / 虚拟内存 | 同一机制的两面：实验里是"一段固定偏移的直映射"，原理课上是多级页表 + 按需映射。差异在于本实验只有内核态、单一映射，尚无进程独立地址空间与按需分页 |
-| `struct Page` 数组 + `pages`/`npage` | 物理页帧管理（页框数据库） | 完全对应：每个物理页一个描述符，记录引用计数与状态。差异是本实验描述符数组在 `end` 之后**静态预留**，内核里通常由引导期分配器动态管理 |
-| `free_area_t` + 双向链表 + `property` | 连续内存分配（空闲链表/分区） | 对应"空闲区描述"的经典做法。差异是本实验只维护一条全局空闲链表，Linux 用 buddy + 分离链表 + per-CPU 缓存 |
-| Best-Fit / First-Fit 的选择与切分 | 动态分区分配的放置策略与外部碎片 | 概念一一对应。差异是教材按"字节"讨论碎片，实验以 4KB 页为单位 |
-| Buddy System：2 的幂次块 + 伙伴合并 | 伙伴系统（页级分配器） | 同一算法。差异是实验面向页、只做单阶链表的最简实现，未实现"按阶位分链表 + 位图" |
-| SLUB：页级之上做对象级缓存 | slab/slub 分配器、内核对象缓存 | 对应"两级分配"思想。差异是简化实现，未涉及 per-CPU 缓存、构造/析构与碎片整理 |
-| `pmm_manager` 函数指针表 | 分配器抽象、策略与机制分离 | 对应内核里分配器 ops 的分层。差异是实验编译期选定单一管理器 |
-| `make grade` 的注入式测试 | 单元测试 / 断言自检 | 对应内核 `BUG_ON`/`panic` 与自检。差异是实验用外部脚本注入测试函数 |
+| 本实验的知识点                                                                          | OS 原理中的对应知识点            | 含义、关系与差异                                                                                                                                  |
+| --------------------------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `va_pa_offset` + Sv39 页表：内核在 `0xFFFFFFFFC0200000` 运行，物理在 `0x80200000` | 地址转换 / 虚拟内存              | 同一机制的两面：实验里是"一段固定偏移的直映射"，原理课上是多级页表 + 按需映射。差异在于本实验只有内核态、单一映射，尚无进程独立地址空间与按需分页 |
+| `struct Page` 数组 + `pages`/`npage`                                              | 物理页帧管理（页框数据库）       | 完全对应：每个物理页一个描述符，记录引用计数与状态。差异是本实验描述符数组在 `end` 之后**静态预留**，内核里通常由引导期分配器动态管理     |
+| `free_area_t` + 双向链表 + `property`                                               | 连续内存分配（空闲链表/分区）    | 对应"空闲区描述"的经典做法。差异是本实验只维护一条全局空闲链表，Linux 用 buddy + 分离链表 + per-CPU 缓存                                          |
+| Best-Fit / First-Fit 的选择与切分                                                       | 动态分区分配的放置策略与外部碎片 | 概念一一对应。差异是教材按"字节"讨论碎片，实验以 4KB 页为单位                                                                                     |
+| Buddy System：2 的幂次块 + 伙伴合并                                                     | 伙伴系统（页级分配器）           | 同一算法。差异是实验面向页、只做单阶链表的最简实现，未实现"按阶位分链表 + 位图"                                                                   |
+| SLUB：页级之上做对象级缓存                                                              | slab/slub 分配器、内核对象缓存   | 对应"两级分配"思想。差异是简化实现，未涉及 per-CPU 缓存、构造/析构与碎片整理                                                                      |
+| `pmm_manager` 函数指针表                                                              | 分配器抽象、策略与机制分离       | 对应内核里分配器 ops 的分层。差异是实验编译期选定单一管理器                                                                                       |
+| `make grade` 的注入式测试                                                             | 单元测试 / 断言自检              | 对应内核 `BUG_ON`/`panic` 与自检。差异是实验用外部脚本注入测试函数                                                                            |
 
 ### 6.2 OS 原理中重要但本实验未覆盖的知识点
 
@@ -864,11 +957,11 @@ Total Score: 20/20
 
 ## 七、附录：提交记录
 
-| 提交 | 内容 | 作者 |
-|---|---|---|
-| `35378c9` | lab2 分支骨架（code/ + report/） | 葛熠 |
-| `8084a7d` | `page_init` + Best-Fit 实现 | 葛熠 |
-| `b479f2e` | Makefile 默认优先使用本地 QEMU 4.1.1 | 葛熠 |
-| `c383ca6` | 加入 `make qemu` / `make grade` 截图 | 葛熠 |
-| — | 任务 3 Buddy System | 吕鹏哲 |
-| — | 任务 4 SLUB | 钟一成 |
+| 提交        | 内容                                     | 作者   |
+| ----------- | ---------------------------------------- | ------ |
+| `35378c9` | lab2 分支骨架（code/ + report/）         | 葛熠   |
+| `8084a7d` | `page_init` + Best-Fit 实现            | 葛熠   |
+| `b479f2e` | Makefile 默认优先使用本地 QEMU 4.1.1     | 葛熠   |
+| `c383ca6` | 加入 `make qemu` / `make grade` 截图 | 葛熠   |
+| —          | 任务 3 Buddy System                      | 吕鹏哲 |
+| —          | 任务 4 SLUB                              | 钟一成 |

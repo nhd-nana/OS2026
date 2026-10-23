@@ -3,17 +3,21 @@
 # Lab2 演示脚本（物理内存与页表）—— 只在 WSL 里运行
 #
 # 用法（在本目录下执行）：
-#   ./demo.sh run       清理后完整编译并运行内核（QEMU 前台，Ctrl+A 松手再按 X 退出）
-#   ./demo.sh grade     运行自动评分（注入测试 + grade.sh），显示两个 PASS 与总分
-#   ./demo.sh buddy     以 PMM=buddy 增量重编（只重编 pmm.c），跑 8 个黑盒用例，结束后自动恢复默认
-#   ./demo.sh slub      运行默认构建，提取 SLUB 自测输出
-#   ./demo.sh all       依次执行 grade + buddy + slub（约 1 分钟，用于快速自检）
-#   ./demo.sh help      显示本帮助
+#   ./demo.sh run         清理后完整编译并运行内核（QEMU 前台，Ctrl+A 松手再按 X 退出）
+#   ./demo.sh grade       运行自动评分（注入测试 + grade.sh），显示两个 PASS 与总分
+#   ./demo.sh buddy       以 PMM=buddy 增量重编（只重编 pmm.c），跑 8 个黑盒用例，结束后自动恢复默认
+#   ./demo.sh slub        运行默认构建，提取 SLUB 自测输出
+#   ./demo.sh mmu         分支任务：双 GDB 自动演示页表查询（约 10 秒）
+#   ./demo.sh mmu-manual  只打印分支任务的手工三终端步骤
+#   ./demo.sh all         依次执行 grade + buddy + slub
+#   ./demo.sh help        显示本帮助
 #
 # 说明：
 #   - 仓库源码不会被修改；buddy 演示通过 make PMM=buddy 加编译宏切换分配器，
 #     Makefile 用 stamp 文件感知 PMM 变化，只重编 pmm.c，跑完自动重编回默认。
 #   - QEMU 版本由 Makefile 自动选择：优先 $HOME/opt/qemu-4.1.1，缺失才退回 PATH。
+#   - mmu 需要：带调试信息的 QEMU 4.1.1、QEMU 源码目录、x86_64 gdb、riscv gdb。
+# ===HELP-END===
 set -u
 
 cd "$(dirname "$0")" || exit 1
@@ -21,6 +25,8 @@ cd "$(dirname "$0")" || exit 1
 QEMU_BIN="${QEMU_BIN:-$HOME/opt/qemu-4.1.1/bin/qemu-system-riscv64}"
 [ -x "$QEMU_BIN" ] || QEMU_BIN="$(command -v qemu-system-riscv64 || true)"
 RUN_TIMEOUT=20
+MMU_SRC="${QEMU_SRC:-$HOME/qemu-4.1.1-build/qemu-4.1.1}"
+RV_GDB="${RV_GDB:-riscv64-unknown-elf-gdb}"
 
 info() { printf '\033[36m[demo]\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m[demo]\033[0m %s\n' "$*"; }
@@ -136,8 +142,165 @@ cmd_buddy() {
     make >/dev/null 2>&1 || warn "恢复默认构建失败，请手动执行 make"
 }
 
+# ---------- 分支任务：双 GDB 调试页表查询 ----------
+
+mmu_manual() {
+    cat <<'MANUAL'
+三个终端（按顺序）：
+
+终端 1 —— 启动调试版 QEMU，复位即停，等 gdb 连 1234：
+    cd <仓库根>/code
+    make debug                      # = qemu ... -kernel bin/ucore.img -s -S
+
+终端 2 —— 用 **x86_64 的 gdb** 附加到 QEMU 进程，调试模拟器本身：
+    pgrep -f qemu-system-riscv64    # 拿到 PID
+    sudo gdb                        # 需要 sudo（ptrace_scope=1 时普通用户不能 attach）
+    (gdb) attach <PID>
+    (gdb) handle SIGPIPE nostop noprint     # 不设这条，QEMU 的 SIGPIPE 会让 gdb 反复中断
+    (gdb) set pagination off
+    (gdb) dir <QEMU 源码目录>               # 让 gdb 找到源码
+    (gdb) break get_physical_address if addr == 0xffffffffc02000d6
+    (gdb) break <QEMU 源码目录>/target/riscv/cpu_helper.c:256
+    (gdb) continue                          # 之后等终端 3 让内核跑起来
+
+终端 3 —— riscv 交叉 gdb 连上 gdbstub，让内核执行：
+    cd <仓库根>/code
+    make gdb                        # 或 riscv64-unknown-elf-gdb -ex 'target remote localhost:1234'
+    (gdb) continue                  # 内核一开始跑，终端 2 就会命中断点
+
+然后在终端 2 单步/打印，观察 TLB 查询与三级查表；完事在终端 2 `detach`，
+终端 3 `quit`，终端 1 里 Ctrl+A 松手再按 X 退出。
+
+关键源码位置（QEMU 4.1.1，target/riscv/cpu_helper.c）：
+    155  get_physical_address()       —— 地址翻译总入口（TLB miss 时才调）
+    172  裸机/M 态的提前返回           —— *physical = addr，不查表
+    184  base = satp.PPN << 12        —— 根表物理地址
+    196  case VM_1_10_MBARE           —— 未开分页：恒等映射
+    237  for (i = 0; i < levels; ...  —— 三级查表主循环
+    252  pte = ldq_phys(...)          —— 读页表项（8 字节）
+    256  if (!(pte & PTE_V))          —— 无效项
+    259  else if (!(pte & (R|W|X)))   —— 内部项，base = ppn << 12 继续下一级
+    333  vpn = addr >> 12             —— 大页：把剩余 VPN 位当页内偏移
+    334  *physical = (ppn | ...) << 12
+    349  return TRANSLATE_SUCCESS
+MANUAL
+}
+
+mmu_cleanup() {
+    pkill -x qemu-system-riscv64 2>/dev/null
+    if [ "${KEEP_LOG:-0}" = "1" ]; then
+        info "日志保留在 $MMU_LOG_DIR"
+    else
+        rm -rf "$MMU_LOG_DIR"
+    fi
+}
+
+cmd_mmu() {
+    [ -x "$QEMU_BIN" ] || { warn "找不到 $QEMU_BIN"; return 1; }
+    command -v gdb >/dev/null || { warn "缺 x86_64 gdb，请先 sudo apt install gdb"; return 1; }
+    command -v "$RV_GDB" >/dev/null || { warn "找不到 $RV_GDB"; return 1; }
+    [ -d "$MMU_SRC" ] || { warn "找不到 QEMU 源码目录 $MMU_SRC（gdb 需要它显示源码）"; return 1; }
+    file "$QEMU_BIN" | grep -q "with debug_info" ||
+        { warn "$QEMU_BIN 没有调试信息，需 --enable-debug 重新编译"; return 1; }
+    [ -f bin/ucore.img ] || { info "编译内核 ..."; make >/dev/null 2>&1 || { warn "编译失败"; return 1; }; }
+
+    MMU_LOG_DIR="$(mktemp -d /tmp/lab2_mmu.XXXXXX)"
+    local native_gdb="$MMU_LOG_DIR/native.gdb" rv_gdb="$MMU_LOG_DIR/rv.gdb"
+    local native_log="$MMU_LOG_DIR/native.log" rv_log="$MMU_LOG_DIR/rv.log"
+    local serial_log="$MMU_LOG_DIR/serial.log"
+    local qemu_args="-machine virt -nographic -bios default -kernel bin/ucore.img -s -S -monitor none"
+
+    cat >"$native_gdb" <<EOF
+set pagination off
+set confirm off
+set breakpoint pending on
+handle SIGPIPE nostop noprint pass
+file $QEMU_BIN
+dir $MMU_SRC
+
+# ① 裸机阶段：内核入口还在物理地址 0x80200000 上取指（satp=0）
+break get_physical_address if addr == 0x80200000
+run $qemu_args -serial file:$serial_log
+
+printf "\n\n############ [1] 分页未开启时的取指 ############\n"
+printf "guest 地址 addr = %#lx（内核入口的物理地址）\n", addr
+printf "satp = %#lx  priv = %d (1=S)  access_type = %d (2=取指)\n", env->satp, env->priv, access_type
+bt 4
+disable 1
+tbreak $MMU_SRC/target/riscv/cpu_helper.c:197
+continue
+printf "  → 停在 197 行 case VM_1_10_MBARE：*physical = addr，等同不翻译\n"
+
+# ② 开分页后：jr 到虚拟地址 kern_init，第一次真正的地址翻译
+break get_physical_address if addr == 0xffffffffc02000d6
+continue
+printf "\n\n############ [2] 开分页后的取指（PC = kern_init 虚拟地址）############\n"
+printf "guest 地址 addr = %#lx\n", addr
+printf "satp = %#lx  (MODE=%d, PPN=%#lx)\n", env->satp, (long)(env->satp >> 60), (long)(env->satp & 0xFFFFFFFFFFFFF)
+printf "基址 base = satp.PPN << 12 = %#lx（根表物理地址）\n", (env->satp & 0xFFFFFFFFFFFFF) << 12
+bt 5
+printf "\n---- 开始走页表（在 256 行打印每一级的索引/地址/页表项）----\n"
+break $MMU_SRC/target/riscv/cpu_helper.c:256 if addr == 0xffffffffc02000d6
+commands
+silent
+printf "  第 %d 级: idx=%#lx  pte_addr=%#lx  pte=%#lx  ppn=%#lx\n", i + 1, idx, pte_addr, pte, ppn
+continue
+end
+break $MMU_SRC/target/riscv/cpu_helper.c:334 if addr == 0xffffffffc02000d6
+continue
+printf "  → 命中叶子项（大页）：vpn=%#lx  ptshift=%d  ppn=%#lx\n", vpn, ptshift, ppn
+printf "  → 计算：*physical = (ppn | (vpn & ((1<<ptshift)-1))) << 12 = %#lx\n", (ppn | (vpn & ((1L << ptshift) - 1))) << 12
+printf "  → 加上页内偏移 %#lx，最终访问的物理地址 = %#lx\n", (addr & 0xFFF), ((ppn | (vpn & ((1L << ptshift) - 1))) << 12) + (addr & 0xFFF)
+printf "\n说明：本实验的根表第 511 项就是 1 GiB 大页叶子项，所以循环只走了 1 级；\n"
+printf "      若换成 4 KiB 粒度页表，会看到 3 级、每级 idx/pte_addr/pte 各一组。\n"
+kill
+quit
+EOF
+
+    pkill -x qemu-system-riscv64 2>/dev/null
+    sleep 1
+    if (exec 3<>/dev/tcp/127.0.0.1/1234) 2>/dev/null; then
+        exec 3<&- 2>/dev/null
+        warn "端口 1234 仍被占用，请先结束残留的 qemu/gdb"
+        rm -rf "$MMU_LOG_DIR"
+        return 1
+    fi
+
+    info "启动 x86_64 gdb 驱动 QEMU（QEMU 以 -s -S 起，等 riscv gdb 连上）"
+    nohup gdb -q -batch -x "$native_gdb" >"$native_log" 2>&1 &
+    local native_pid=$!
+    for _ in $(seq 1 40); do
+        grep -q "Remote debugging\|Breakpoint 1 at" "$native_log" 2>/dev/null && break
+        sleep 0.3
+    done
+    sleep 1
+
+    info "启动 riscv gdb 连接 gdbstub 并让内核运行"
+    cat >"$rv_gdb" <<'EOF'
+set confirm off
+set pagination off
+file bin/kernel
+set arch riscv:rv64
+target remote localhost:1234
+continue
+quit
+EOF
+    timeout 40 "$RV_GDB" -batch -x "$rv_gdb" >"$rv_log" 2>&1
+    sleep 1
+    wait "$native_pid" 2>/dev/null
+
+    echo
+    ok "=== 观察记录（来自 QEMU 源码层面的 x86_64 gdb）==="
+    sed -n '/############ \[1\]/,$p' "$native_log"
+    if [ -s "$serial_log" ]; then
+        echo
+        info "（同一时刻内核串口输出最后一行：$(grep -a . "$serial_log" | tail -1)）"
+    fi
+    mmu_cleanup
+}
+
 cmd_help() {
-    sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '/^# 用法/,/^# ===HELP-END===/{/^# ===HELP-END===/d;p}' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-help}" in
@@ -145,6 +308,8 @@ case "${1:-help}" in
     grade) cmd_grade ;;
     slub)  cmd_slub ;;
     buddy) cmd_buddy ;;
+    mmu)        cmd_mmu ;;
+    mmu-manual) mmu_manual ;;
     all)
         cmd_grade
         echo
