@@ -7,3 +7,8 @@ bin/
 .ucore*
 cscope*
 tags
+
+# 全局 gitignore 里有未锚定的 `Debug/`，会误伤内核的 kern/debug/ 目录，
+# 导致 assert.h / panic.c 不被提交。这里显式取回。
+!code/kern/debug/
+!code/kern/debug/**
