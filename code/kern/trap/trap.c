@@ -6,6 +6,7 @@
 #include <memlayout.h>
 #include <mmu.h>
 #include <riscv.h>
+#include <sbi.h>
 #include <stdio.h>
 #include <trap.h>
 
@@ -80,13 +81,42 @@ void print_regs(struct pushregs *gpr) {
     cprintf("  t6       0x%08x\n", gpr->t6);
 }
 
-//lab3 function2 2412799
+//lab3 function2 2412679（interrupt_handler）/ 2412799（exception_handler）
 
-/* 中断处理：时钟中断由钟一成实现，此处先保留最小框架以便整体编译通过 */
+/* 累计打印多少次 "100 ticks" 之后关机。
+ * Test 3 要先看到 ticks 涨到 200（即至少 2 次打印），这里取 10 次 = 1000 ticks，
+ * 既满足测试要求，又能让 make qemu 自己退出，不必每次 Ctrl+A X。 */
+#define SHUTDOWN_AFTER 10
+
+/* 中断处理：按中断号分发。
+ * 注意 scause 的最高位为 1 才表示"中断"，中断号在低位，
+ * 所以比较前必须先把 bit63 掩掉，否则 case 永远不匹配。 */
 void interrupt_handler(struct trapframe *tf) {
-    // TODO(2412679 钟一成)：IRQ_S_TIMER 重装定时器 + ticks + print_ticks + 关机；
-    //                       IRQ_S_SOFT / IRQ_S_EXT 分类提示；其余走 print_trapframe
-    print_trapframe(tf);
+    uintptr_t cause = tf->cause & ~((uintptr_t)1 << 63);
+
+    switch (cause) {
+        case IRQ_S_TIMER:
+            /* sbi_set_timer 相当于"一次性闹钟"：不重装，下一次中断永远不会再来 */
+            clock_set_next_event();
+            ticks++;
+            if (ticks % TICK_NUM == 0) {
+                print_ticks();
+                if (ticks / TICK_NUM >= SHUTDOWN_AFTER) {
+                    sbi_shutdown();
+                }
+            }
+            break;
+        case IRQ_S_SOFT:
+            cprintf("Supervisor software interrupt\n");
+            break;
+        case IRQ_S_EXT:
+            cprintf("Supervisor external interrupt\n");
+            break;
+        default:
+            cprintf("Unknown interrupt: cause %d\n", (int)cause);
+            print_trapframe(tf);
+            break;
+    }
 }
 
 /* 异常处理：非法指令与断点必须推进 sepc，否则会反复执行同一条指令 */
