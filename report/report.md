@@ -90,6 +90,177 @@ sret  →  CPU 用 sstatus.SPP 决定回哪一级、用 sepc 决定回哪条指�
 
 ### 功能模块一：Trap 入口与上下文恢复
 
+**负责人：** 2412133-吕鹏哲
+
+**一、模块功能描述**
+
+本模块负责 Trap 从"进入内核"到"返回原执行流"之间的底层上下文管理，对应 `kern/trap/trapentry.S` 里的两个汇编符号，合起来补上"保存 → 处理 → 恢复"这条闭环的另外两段：
+
+```text
+Trap 发生 → __alltraps 建立入口 → SAVE_ALL 保存上下文（已给）
+          → mv a0, sp; jal trap 把 tf 交给 C 层 trap(tf) 处理
+          → __trapret → RESTORE_ALL 恢复上下文（本模块）→ sret 返回
+```
+
+- **`RESTORE_ALL`**：`SAVE_ALL` 的镜像。`SAVE_ALL` 把 Trap 发生时的处理器状态（x0..x31 + `sstatus`/`sepc`/`badvaddr`/`cause` 共 36 个槽位）保存到当前内核栈上的 trapframe，`RESTORE_ALL` 按完全相同的布局反向取回，使紧跟其后的 `sret` 能回到被打断处。
+- **`__alltraps`**：汇编 Trap 入口。`SAVE_ALL` 之后把 trapframe 指针按 RISC-V 调用约定放进第一参数寄存器 `a0`，再 `jal trap` 调用 `trap(struct trapframe *tf)`，把保存好的上下文交给 C 层分类处理。
+
+整个模块的对外接口链是 `__alltraps → trap(struct trapframe *tf) → __trapret → sret`，本模块不修改 `SAVE_ALL`、`struct trapframe`、`trap()` 签名。
+
+**二、实现**
+
+`RESTORE_ALL`（`__trapret` 里 `sret` 之前调用）：
+
+```asm
+.macro RESTORE_ALL
+    # 先取两个 CSR 槽位：RISC-V 不能从内存直写 CSR，必须经 GPR 中转
+    LOAD s1, 32*REGBYTES(sp)        # s1 = 保存的 sstatus
+    LOAD s2, 33*REGBYTES(sp)        # s2 = 保存的 sepc
+
+    # 用 SSTATUS_SPP 判断返回特权级：SPP=1 来自内核态，sscratch 保持 0；
+    # SPP=0 来自用户态（lab4 用到），先把内核 trapframe 指针存回 sscratch
+    andi s0, s1, SSTATUS_SPP
+    bnez s0, 1f
+    csrw sscratch, sp
+1:
+    csrw sstatus, s1
+    csrw sepc, s2
+
+    # 恢复 x1, x3..x31（跳过硬连线为 0 的 x0）
+    LOAD x1, 1*REGBYTES(sp)
+    LOAD x3, 3*REGBYTES(sp)
+    # …… x4 .. x31 逐行，偏移 = 寄存器号 * REGBYTES ……
+    LOAD x31, 31*REGBYTES(sp)
+    # sp 必须最后恢复：它是上面所有 LOAD 的基址
+    LOAD x2, 2*REGBYTES(sp)
+.endm
+```
+
+`__alltraps`：
+
+```asm
+__alltraps:
+    SAVE_ALL
+    mv a0, sp          # a0 = trapframe 指针（RISC-V 第一参数）
+    jal trap           # 调 C 函数 trap(tf)
+    # trap 是 C 函数，sp 属 callee-saved，返回后 sp 不变，落到 __trapret
+```
+
+完整逐行代码见 `kern/trap/trapentry.S`（x3..x31 的 `LOAD` 全部展开，偏移与 `SAVE_ALL` 的 `STORE` 一一对应）。
+
+**三、最终提示词**
+
+与 `report/prompt.md` 功能模块一的「生成实现的提示词」逐字一致，四段式 `[PROMPT]`/`[RELY]`/`[GUARANTEE]`/`[SPECIFICATION]`：
+
+[PROMPT]
+在 `kern/trap/trapentry.S` 中，只补两处 `#lab3 function1 YOUR CODE` 占位，其余（`SAVE_ALL`、文件头部 `#define sbadaddr stval` 等）一律不动：
+
+1. `.macro RESTORE_ALL` 与 `.endm` 之间——按 `SAVE_ALL` 的保存关系逆序恢复 36 个槽位；
+2. `__alltraps` 标签内、`SAVE_ALL` 之后——把 trapframe 指针按 RISC-V 调用约定传给 `trap()` 并调用。
+
+背景：`SAVE_ALL` 已在栈顶建好 36 槽 trapframe（每槽 `REGBYTES`=8 字节）：偏移 0~31 依次是 x0..x31（顺序同 `struct pushregs`），偏移 32/33/34/35 依次是 `sstatus`/`sepc`/`badvaddr`/`cause`。
+
+要求：
+
+- `RESTORE_ALL` 先处理两个 CSR 槽位：偏移 32（sstatus）、33（sepc）不能 `LOAD` 直写 CSR，必须先 `LOAD` 到某个通用寄存器再 `csrw`；`csrw sstatus`、`csrw sepc` 都要在 `sret` 之前完成。
+- 用 sstatus 的 `SSTATUS_SPP` 位判断返回特权级：SPP==1（内核态）保持 `sscratch` 不动（此时为 0）；SPP==0（用户态，留待 lab4）先 `csrw sscratch, sp` 存下内核 trapframe 指针。用 `andi` 取位 + `bnez` 跳过。
+- 通用寄存器 `LOAD x<i>, <i>*REGBYTES(sp)` 逐个恢复（i = 1,3,4,...,31），跳过 x0（硬连线 0）；**x2(sp) 必须最后恢复**（它同时是所有 `LOAD` 的基址），从 `2*REGBYTES(sp)` 读。
+- `__alltraps` 里 `SAVE_ALL` 之后 `sp` 已指向 trapframe：`mv a0, sp`（a0 是第一参数），再 `jal trap`；`trap` 是 C 函数，`sp` 属 callee-saved，返回后 `sp` 不变，直接落到紧随其后的 `__trapret`（`RESTORE_ALL` + `sret`）。不要手改 `sp`、不要重复调用 `RESTORE_ALL`。
+
+禁止：不改 `SAVE_ALL`、`struct trapframe`/`struct pushregs`、`trap()` 签名、`__trapret` 的 `sret`，不新增文件。
+
+[RELY]
+
+| 依赖 | 位置 | 提供什么 |
+|---|---|---|
+| `REGBYTES`(=8) | `libs/riscv.h` | 槽位字节大小，偏移写作 `i*REGBYTES(sp)` |
+| `LOAD`(=ld) / `STORE`(=sd) | `libs/riscv.h` | RV64 载入/存储宏 |
+| `SAVE_ALL` | `kern/trap/trapentry.S` | 已提供的保存序列，恢复布局与逆序的唯一依据 |
+| `SSTATUS_SPP` = 0x00000100 | `libs/riscv.h` | sstatus 中判定返回特权级的位 |
+| `struct trapframe` / `struct pushregs` | `kern/trap/trap.h` | 36 槽布局；gpr 顺序 = x0..x31 |
+| `void trap(struct trapframe *tf)` | `kern/trap/trap.c` | C 层入口，第一参数经 `a0` 传递 |
+| `__trapret` | `kern/trap/trapentry.S` | `RESTORE_ALL` + `sret` 的返回路径 |
+| `sret` | RISC-V 特权指令 | 依据 `sepc`/`sstatus` 返回被中断执行流 |
+
+[GUARANTEE]
+
+```asm
+.macro RESTORE_ALL      # 输入：sp 指向 trapframe；输出：寄存器/CSR 恢复，sp 回到原栈顶
+.endm
+
+__alltraps:             # Trap 入口：SAVE_ALL -> 传 tf 给 trap() -> 落到 __trapret -> sret
+```
+
+对外接口链保持：`__alltraps` → `trap(struct trapframe *tf)` → `__trapret` → `sret`，任何一环的签名与调用约定不得改变。
+
+[SPECIFICATION]
+
+- **Pre-condition**：`SAVE_ALL` 已执行，`sp` 指向 36 槽 trapframe；`sscratch` 被清为 0；槽位 2（`tf->gpr.sp`）保存压栈前原始 `sp`；槽位 32/33 保存 `sstatus`/`sepc`。
+- **Post-condition**：x1,x3..x31、`sp`、`sstatus`、`sepc` 全部恢复到 Trap 前值，`sret` 正确跳回 `sepc`；内核态返回后 `sscratch` 仍为 0。
+- **Case A（内核态返回，SPP=1，本实验主要场景）**：`ebreak`/非法指令/定时器中断均来自 S-mode，走 `andi + bnez` 跳过 sscratch 分支，26 个寄存器逐个原样恢复（Test 1 逐位比对）。
+- **Case B（用户态返回，SPP=0，预留）**：执行 `csrw sscratch, sp`，本实验不触发，仅要求路径正确且不影响 Case A。
+- **Case C（异常推进 sepc）**：`exception_handler` 已 `tf->epc += 4`，`RESTORE_ALL` 必须重读槽位 33 并 `csrw sepc`，使 `sret` 跳过触发异常的指令，避免同一条指令反复异常。
+- **不变式**：每个 `LOAD` 偏移与 `SAVE_ALL` 对应 `STORE` 偏移严格相等；`sp` 走槽位 2 且放在所有 `LOAD` 之后恢复。
+
+**四、实现迭代过程**
+
+**第 1 次生成 → Test 1 未过（65/100）。** 按提示词生成 `RESTORE_ALL` 与 `__alltraps` 后 `make grade`：
+
+```text
+  - trap entry, register restore, and breakpoint EPC: FAIL (0/35)
+  - illegal instruction EPC advance and return: PASS (25/25)
+  - re-armed supervisor timer and repeated trap return: PASS (40/40)
+Total Score: 65/100
+```
+
+现象：`make qemu`/串口能看到 `Breakpoint at 0xffffffffc02019c8`，随后打印 `[Test 1] Trap entry and breakpoint return: FAIL (register context)`。说明 Trap 能进、能出、`exception_handler` 也推进了 epc，但 26 个寄存器比对不过。
+
+**排查：反汇编测试函数定位错位。** `riscv64-unknown-elf-objdump -d bin/kernel` 看 `test_lab3_register_context`：
+
+```text
+ffffffffc02019c8:	9002                	ebreak
+ffffffffc02019ca:	10500513          	li	a0,261
+ffffffffc02019ce:	0ca29863          	bne	t0,a0,...
+```
+
+问题就在这里：`ebreak` 是 **2 字节**的 `c.ebreak`（编码 `0x9002`），而 `exception_handler` 按规范对断点做 `tf->epc += 4`。`epc` 从 `0x…19c8` 加 4 落到 `0x…19cc`，正好落在 `li a0,261`（4 字节，`0x…19ca`~`0x…19cd`）的**中间**，`sret` 从半条指令处继续执行，寄存器自然乱掉。
+
+**根因：压缩指令扩展。** 工具链默认 `-march=rv64imafdc`（末尾的 `c` 即压缩扩展），会把 `ebreak` 压缩成 2 字节。单独验证：
+
+```text
+$ printf "ebreak\n" | as -march=rv64imafdc -o /tmp/a.o -   # → 9002  ebreak（2 字节）
+$ printf "ebreak\n" | as -march=rv64imafd  -o /tmp/b.o -   # → 00100073  ebreak（4 字节）
+```
+
+而本实验规范里异常处理统一 `epc += 4`、非法指令 `.word 0x0000007b` 也是显式 4 字节，即**规范假设所有异常指令都是 4 字节**。去掉压缩扩展就能恢复这个假设。
+
+**修复：`Makefile` 显式去掉 `c`。** 在 `CFLAGS` 加 `-march=rv64imafd`（与团队已做的 `#define sbadaddr stval`、补 `PHYSICAL_MEMORY_END` 属同类"工具链/材料跟不上环境"的兼容修复）：
+
+```makefile
+CFLAGS  := -mcmodel=medany -march=rv64imafd -std=gnu99 -Wno-unused -Werror
+```
+
+**修复后 `make grade`：**
+
+```text
+  - trap entry, register restore, and breakpoint EPC: PASS (35/35)
+  - illegal instruction EPC advance and return: PASS (25/25)
+  - re-armed supervisor timer and repeated trap return: PASS (40/40)
+Total Score: 100/100
+```
+
+> 备注：本机本次实际用的工具链是 `riscv64-unknown-elf-gcc (SiFive GCC-Metal 10.2.0-2020.12.8) 10.2.0`（位于 `/mnt/d/OS2026/riscv/…`，因环境里没有文档所述的 15.1.0）。`-march=rv64imafd` 对任何版本都无害：它只是禁用压缩指令，让 `ebreak` 恒为 4 字节，正好符合规范对 `epc += 4` 的假设。
+
+**五、测试覆盖说明**
+
+| 覆盖点 | 测试手段 | 对应实现 | 结果 |
+|---|---|---|---|
+| Trap 入口 + 传参 | `ebreak` → `__alltraps` | `mv a0, sp` + `jal trap` | `Breakpoint at` 打印 |
+| 26 个寄存器恢复 | 赋 0x105..0x11f 后逐位比对 | 逐个 `LOAD x<i>, i*REGBYTES(sp)` | PASS |
+| sp 特殊恢复 | `x2` 从槽位 2 最后恢复 | `LOAD x2, 2*REGBYTES(sp)` 放最后 | PASS |
+| CSR 恢复 | `sret` 回到 `ebreak` 下一条 | `LOAD s1/s2` + `csrw sstatus/sepc` | PASS |
+| 断点 epc 推进 | `epc += 4` 跳过 4 字节指令 | 配合 `-march=rv64imafd` 让 `ebreak` 为 4 字节 | PASS |
+
 ### 功能模块二：中断与异常处理
 
 **负责人：** 2412679-钟一成（`interrupt_handler`）

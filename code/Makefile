@@ -30,7 +30,9 @@ HOSTCFLAGS	:= -Wall -O2
 GDB		:= $(GCCPREFIX)gdb
 
 CC		:= $(GCCPREFIX)gcc
-CFLAGS  := -mcmodel=medany -std=gnu99 -Wno-unused -Werror 
+# 显式去掉压缩扩展 'c'：默认 rv64imafdc 会把 ebreak 汇编成 2 字节的 c.ebreak，
+# 而 exception_handler 按规范对断点做 tf->epc += 4（按 4 字节），两者必须一致。
+CFLAGS  := -mcmodel=medany -march=rv64imafd -std=gnu99 -Wno-unused -Werror
 CFLAGS	+= -fno-builtin -Wall -O2 -nostdinc $(DEFS)
 CFLAGS	+= -fno-stack-protector -ffunction-sections -fdata-sections
 CFLAGS	+= -g
