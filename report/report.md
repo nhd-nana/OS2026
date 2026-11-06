@@ -251,6 +251,36 @@ Total Score: 100/100
 
 > 备注：本机本次实际用的工具链是 `riscv64-unknown-elf-gcc (SiFive GCC-Metal 10.2.0-2020.12.8) 10.2.0`（位于 `/mnt/d/OS2026/riscv/…`，因环境里没有文档所述的 15.1.0）。`-march=rv64imafd` 对任何版本都无害：它只是禁用压缩指令，让 `ebreak` 恒为 4 字节，正好符合规范对 `epc += 4` 的假设。
 
+**统稿补充（2026-11-07，葛熠）：把"固定 +4"升级为"按指令编码判断长度"。**
+
+上面 `-march` 的做法能让本实验通过，但规范的原文要求"不同异常对应的指令长度可能不同，不能假定所有异常都使用相同的 epc 偏移量，需要结合 RISC-V 指令编码规则判断"。只靠禁用压缩扩展，等于把这个问题绕过去：一旦今后开启 C 扩展（例如 lab4 的用户态程序按默认 `-march` 编译），固定 `+4` 会再次踩坑。
+
+因此 `exception_handler` 现在改为读触发异常那条指令的首字节来判断长度：
+
+```c
+/* 低 2 位为 0b11 → 32 位指令；否则是 16 位压缩指令 */
+static size_t
+instruction_len(uintptr_t epc)
+{
+    uint16_t head = *(volatile uint16_t *)epc;
+    return (head & 0x3) == 0x3 ? 4 : 2;
+}
+```
+
+两处 `tf->epc += 4` 都换成 `tf->epc += instruction_len(tf->epc)`。
+
+验证方式：临时把 `-march=rv64imafd` 从 `CFLAGS` 去掉（此时工具链默认 `rv64imafdc`，`ebreak` 重新变成 2 字节 `c.ebreak`），重新 `make grade`：
+
+```text
+  - trap entry, register restore, and breakpoint EPC: PASS (35/35)
+  - illegal instruction EPC advance and return: PASS (25/25)
+  - re-armed supervisor timer and repeated trap return: PASS (40/40)
+Total Score: 100/100
+```
+
+即"2 字节断点"这条路径也被真正走通，不再依赖编译选项。`-march=rv64imafd` 作为构建一致性约束保留
+（它同时保证内核里不混入压缩指令，便于与 `SAVE_ALL`/trapframe 的机械对照），但**不再是正确性的前提**。
+
 **五、测试覆盖说明**
 
 | 覆盖点 | 测试手段 | 对应实现 | 结果 |
@@ -259,7 +289,8 @@ Total Score: 100/100
 | 26 个寄存器恢复 | 赋 0x105..0x11f 后逐位比对 | 逐个 `LOAD x<i>, i*REGBYTES(sp)` | PASS |
 | sp 特殊恢复 | `x2` 从槽位 2 最后恢复 | `LOAD x2, 2*REGBYTES(sp)` 放最后 | PASS |
 | CSR 恢复 | `sret` 回到 `ebreak` 下一条 | `LOAD s1/s2` + `csrw sstatus/sepc` | PASS |
-| 断点 epc 推进 | `epc += 4` 跳过 4 字节指令 | 配合 `-march=rv64imafd` 让 `ebreak` 为 4 字节 | PASS |
+| 断点 epc 推进 | 4 字节指令 +4 | `instruction_len()` 判 `0b11` | PASS |
+| 2 字节断点的 epc 推进 | 去掉 `-march=rv64imafd` 让 `ebreak` 变 `c.ebreak` | `instruction_len()` 返回 2 | PASS |
 
 ### 功能模块二：中断与异常处理
 
@@ -411,7 +442,7 @@ make
 make qemu
 ```
 
-串口实际输出（2026-10-29，QEMU 4.1.1）：
+串口实际输出（2026-11-07 复验，QEMU 4.1.1 + gcc 15.1.0）：
 
 ```text
 OpenSBI v0.4 (Jul  2 2019 11:53:53)
@@ -426,18 +457,18 @@ Physical Memory from DTB:
 DTB init completed
 (THU.CST) os is loading ...
 Special kernel symbols:
-  entry  0xffffffffc0200054 (virtual)
-  etext  0xffffffffc0201e7a (virtual)
-  edata  0xffffffffc0206028 (virtual)
-  end    0xffffffffc0206498 (virtual)
-Kernel executable memory footprint: 26KB
+  entry  0xffffffffc020005c (virtual)
+  etext  0xffffffffc0202804 (virtual)
+  edata  0xffffffffc0207028 (virtual)
+  end    0xffffffffc0207498 (virtual)
+Kernel executable memory footprint: 30KB
 memory management: best_fit_pmm_manager
 phys memory: [0x0000000080000000, 0x0000000088000000)
 npage: 0x88000
-free pages: 0x7cb9
+free pages: 0x7cb8
 check_alloc_page() succeeded!
-satp virtual address: 0xffffffffc0205000
-satp physical address: 0x0000000080205000
+satp virtual address: 0xffffffffc0206000
+satp physical address: 0x0000000080206000
 ++ setup timer interrupts
 100 ticks
 100 ticks
@@ -465,20 +496,23 @@ make grade
 
 `make grade` 会：把工作区复制到 `/tmp/lab3_grade` → `inject.py` 注入 `kern/test/` 三个测试源并在 `kern_init()` 里插入调用 → 用不同 `-D` 宏编译三次、分别跑三次 QEMU → 用 `grep -F` 检查串口输出。
 
-当前实测结果（2026-10-29）：
+当前实测结果（2026-11-07 复验，gcc 15.1.0 + QEMU 4.1.1；模块一合入后的完整结果）：
 
 ```text
-  - trap entry, register restore, and breakpoint EPC: FAIL (0/35)
+  - trap entry, register restore, and breakpoint EPC: PASS (35/35)
   - illegal instruction EPC advance and return: PASS (25/25)
   - re-armed supervisor timer and repeated trap return: PASS (40/40)
-Total Score: 65/100
+Total Score: 100/100
 ```
 
 | 测试 | 分值 | 结果 | 与本人的关系 |
 |---|---|---|---|
-| Test 1 Trap 入口 + 寄存器恢复 + 断点返回 | 35 | ❌ 未通过 | 功能模块一，非本人负责 |
+| Test 1 Trap 入口 + 寄存器恢复 + 断点返回 | 35 | ✅ PASS | 功能模块一，非本人负责（吕鹏哲实现） |
 | Test 2 非法指令 EPC 前进 + 返回 | 25 | ✅ PASS | 其中的软件中断与未知中断分支由本人实现 |
 | Test 3 时钟重装 + 反复 trap 返回 | 40 | ✅ PASS | 全部由本人实现 |
+
+> 时间线说明：模块二单独提测时（2026-10-29）只有 Test 2/3 通过，Test 1 因 `trapentry.S` 尚未实现而 FAIL，得分 65/100；
+> 模块一合入后为 100/100。下表的覆盖分析针对 `interrupt_handler` 本身，与模块一是否合入无关。
 
 **Test 2 里属于本人的部分**：25 分要求同时命中四个字符串——`Illegal instruction at`、`Supervisor software interrupt`、`Unknown interrupt: cause 15`、`cause    0x00000014`。中间两条正是 `interrupt_handler` 的软件中断分支与未知中断分支打印的，它们能同时出现在输出里，说明"掩 bit63 → 分发 → 分类打印"这条路径是通的。
 
@@ -532,14 +566,16 @@ Total Score: 65/100
 | 提交 | 内容 |
 |---|---|
 | `ec4e2a5` | 建分支、lab2 回填、环境打通 |
-| `cf64711` | 三份项目文档入库 |
-| （待补） | 实现 `interrupt_handler`（时钟重装 / ticks / 关机 / 中断分类） |
+| `cf64711` | 三份项目文档入库、实验步骤框架 |
+| `be15291` | 实现 `interrupt_handler`（时钟重装 / ticks / 关机 / 中断分类） |
+| `92b437b` | 按模板填写模块二报告与提示词 |
+| `6144af9` | 实现 `trapentry.S`（`RESTORE_ALL` / `__alltraps`），修复 `c.ebreak` 并补模块一报告 |
 
-**待办**
+**已完成的交付**
 
-- [ ] 功能模块一 `RESTORE_ALL` 与 `jal trap`（吕鹏哲）→ Test 1 通过
-- [ ] `make grade` 达到 100/100
-- [ ] 补充 `make qemu` / `make grade` 截图到 `report/images/`
-
-> **截图说明**：本报告所列运行结果与评分，需要等功能模块一（`trapentry.S` 的 `RESTORE_ALL` 与 `jal trap`）补全后才能复现并截图。
-> 在模块一完成之前，`make qemu` 会停在 `++ setup timer interrupts` 之后（第一次时钟中断无法返回），`make grade` 一个用例都过不了，因此 `report/images/` 下的两张运行截图需等代码补全后再补。
+- [x] 功能模块一 `RESTORE_ALL` 与 `jal trap`（吕鹏哲）→ Test 1 `PASS (35/35)`
+- [x] 功能模块二 `interrupt_handler`（钟一成）→ Test 2 `PASS (25/25)`、Test 3 `PASS (40/40)`
+- [x] 功能模块二 `exception_handler`（葛熠）→ 非法指令与断点 epc 前进
+- [x] lab2 代码回填与工具链兼容修复
+- [x] `make grade` = **100/100**
+- [ ] 补充 `make qemu` / `make grade` 截图到 `report/images/`（需人工截图后提交）

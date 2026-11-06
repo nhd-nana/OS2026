@@ -59,6 +59,7 @@
     .endm
 
     .macro RESTORE_ALL
+    #lab3 function1 2412133
     # 先取出两个 CSR 槽位（sstatus / sepc），RISC-V 不能从内存直接写 CSR，
     # 必须经通用寄存器中转。借用 s0/s1/s2 作为临时寄存器，它们的原值随后会
     # 从各自的 gpr 槽位恢复回来。
@@ -114,6 +115,8 @@
 __alltraps:
     SAVE_ALL
 
+    #lab3 function1 2412133
+    # sp should be the same as before "jal trap"
     # 按 RISC-V 调用约定，把 trapframe 指针（当前 sp）放进 a0 作为 trap() 的第一参数，
     # 然后调用 C 函数 trap(struct trapframe *tf)。sp 是 callee-saved，trap 返回后不变，
     # 因此直接落到紧随其后的 __trapret 完成恢复与 sret。

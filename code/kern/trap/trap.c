@@ -119,16 +119,28 @@ void interrupt_handler(struct trapframe *tf) {
     }
 }
 
+/* RISC-V 指令长度编码：低 2 位为 0b11 表示 32 位指令，否则是 16 位压缩指令。
+ * 异常返回必须按真实长度推进 sepc：
+ *   - 一律 +4  → 遇到 2 字节压缩指令（如 c.ebreak）会落进下一条指令中间；
+ *   - 一律 +2  → 32 位指令只走一半，原指令被重复执行。
+ * 因此读触发异常的那条指令的首字节来判断。 */
+static size_t
+instruction_len(uintptr_t epc)
+{
+    uint16_t head = *(volatile uint16_t *)epc;
+    return (head & 0x3) == 0x3 ? 4 : 2;
+}
+
 /* 异常处理：非法指令与断点必须推进 sepc，否则会反复执行同一条指令 */
 void exception_handler(struct trapframe *tf) {
     switch (tf->cause) {
         case CAUSE_ILLEGAL_INSTRUCTION:
             cprintf("Illegal instruction at 0x%016lx\n", tf->epc);
-            tf->epc += 4;
+            tf->epc += instruction_len(tf->epc);
             break;
         case CAUSE_BREAKPOINT:
             cprintf("Breakpoint at 0x%016lx\n", tf->epc);
-            tf->epc += 4;
+            tf->epc += instruction_len(tf->epc);
             break;
         default:
             print_trapframe(tf);
