@@ -488,6 +488,8 @@ satp physical address: 0x0000000080206000
 - 随后每 100 个 tick 打一行 `100 ticks`（`TICK_NUM = 100`），**能连续打出 10 行而不是 1 行**，直接证明"每次中断都重装了定时器"；
 - 打完第 10 行后内核调用 `sbi_shutdown()`，QEMU 自行退出，无需 `Ctrl+A` `X`。
 
+![make qemu 运行结果](images/lab3_make_qemu.png)
+
 ### 5.2 自动评分（`make grade`）
 
 ```bash
@@ -504,6 +506,8 @@ make grade
   - re-armed supervisor timer and repeated trap return: PASS (40/40)
 Total Score: 100/100
 ```
+
+![make grade 评分结果](images/lab3_grade.png)
 
 | 测试 | 分值 | 结果 | 与本人的关系 |
 |---|---|---|---|
@@ -578,4 +582,4 @@ Total Score: 100/100
 - [x] 功能模块二 `exception_handler`（葛熠）→ 非法指令与断点 epc 前进
 - [x] lab2 代码回填与工具链兼容修复
 - [x] `make grade` = **100/100**
-- [ ] 补充 `make qemu` / `make grade` 截图到 `report/images/`（需人工截图后提交）
+- [x] 截图：`report/images/lab3_make_qemu.png`、`report/images/lab3_grade.png`
