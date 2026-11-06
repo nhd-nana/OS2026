@@ -45,6 +45,8 @@ Lab3 要补上的正是这个能力——**让内核能被外部事件打断，�
 
 **为什么仍然用 QEMU 4.1.1**：沿用 Lab2 的结论。lab3 实测 4.1.1 下 `-device loader,addr=0x80200000` 与 `-kernel bin/ucore.img` 两种写法都能正常启动，因此 lab3 的 `Makefile` 与 `tools/grade.sh` 不需要改动（lab2 之所以改成 `-kernel`，是因为那边被迫用了 QEMU 7 的新版 OpenSBI，两者的 `satp` 翻译时序不同）。
 
+> 复现时注意：机器上若同时装了 QEMU 7（`/opt/qemu/bin`），它默认排在 PATH 前面。7.0 的 `virt` 机器不会给 OpenSBI 传 `next_addr`，固件直接跳到 `0x0`，内核根本没被装载 —— 表现是 `make grade` **不报错但三档全 0 分**、串口日志为空。用 `which qemu-system-riscv64` 确认是 4.1.1 再跑。
+
 ## 三、实验整体逻辑分析
 
 ### 3.1 本章节的逻辑主线
