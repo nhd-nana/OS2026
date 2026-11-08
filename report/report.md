@@ -12,9 +12,9 @@
 
 | 成员 | 负责的模块 |
 |---|---|
-| 2412799-葛熠 | lab2 代码回填、环境与构建、`exception_handler()`、报告统稿 |
+| 2412799-葛熠 | lab2 代码回填、环境与构建、**功能模块二 异常部分 `exception_handler()`**、报告统稿 |
 | 2412133-吕鹏哲 | 功能模块一 `trapentry.S`（`RESTORE_ALL`、`__alltraps`） |
-| 2412679-钟一成 | 功能模块二 `interrupt_handler()` |
+| 2412679-钟一成 | **功能模块二 中断部分 `interrupt_handler()`** |
 
 ## 一、实验目的
 
@@ -165,7 +165,7 @@ __alltraps:
 要求：
 
 - `RESTORE_ALL` 先处理两个 CSR 槽位：偏移 32（sstatus）、33（sepc）不能 `LOAD` 直写 CSR，必须先 `LOAD` 到某个通用寄存器再 `csrw`；`csrw sstatus`、`csrw sepc` 都要在 `sret` 之前完成。
-- 用 sstatus 的 `SSTATUS_SPP` 位判断返回特权级：SPP==1（内核态）保持 `sscratch` 不动（此时为 0）；SPP==0（用户态，留待 lab4）先 `csrw sscratch, sp` 存下内核 trapframe 指针。用 `andi` 取位 + `bnez` 跳过。
+- 用 sstatus 的 `SSTATUS_SPP` 位判断返回特权级：SPP\==1（内核态）保持 `sscratch` 不动（此时为 0）；SPP\==0（用户态，留待 lab4）先 `csrw sscratch, sp` 存下内核 trapframe 指针。用 `andi` 取位 + `bnez` 跳过。
 - 通用寄存器 `LOAD x<i>, <i>*REGBYTES(sp)` 逐个恢复（i = 1,3,4,...,31），跳过 x0（硬连线 0）；**x2(sp) 必须最后恢复**（它同时是所有 `LOAD` 的基址），从 `2*REGBYTES(sp)` 读。
 - `__alltraps` 里 `SAVE_ALL` 之后 `sp` 已指向 trapframe：`mv a0, sp`（a0 是第一参数），再 `jal trap`；`trap` 是 C 函数，`sp` 属 callee-saved，返回后 `sp` 不变，直接落到紧随其后的 `__trapret`（`RESTORE_ALL` + `sret`）。不要手改 `sp`、不要重复调用 `RESTORE_ALL`。
 
@@ -255,6 +255,8 @@ Total Score: 100/100
 
 **统稿补充（2026-11-07，葛熠）：把"固定 +4"升级为"按指令编码判断长度"。**
 
+> 说明：这里改的是**模块二异常部分**的 `exception_handler()`（见 §2.2，负责人葛熠），因为它直接决定模块一的 Test 1 能否通过，所以在本节的迭代线里一并记录，完整分析放在 §2.2。
+
 上面 `-march` 的做法能让本实验通过，但规范的原文要求"不同异常对应的指令长度可能不同，不能假定所有异常都使用相同的 epc 偏移量，需要结合 RISC-V 指令编码规则判断"。只靠禁用压缩扩展，等于把这个问题绕过去：一旦今后开启 C 扩展（例如 lab4 的用户态程序按默认 `-march` 编译），固定 `+4` 会再次踩坑。
 
 因此 `exception_handler` 现在改为读触发异常那条指令的首字节来判断长度：
@@ -296,7 +298,7 @@ Total Score: 100/100
 
 ### 功能模块二：中断与异常处理
 
-**负责人：** 2412679-钟一成（`interrupt_handler`）
+**分工：** 中断部分 `interrupt_handler()` — 2412679-钟一成；异常部分 `exception_handler()` — 2412799-葛熠
 
 **一、入口：中断和异常是怎么被分开的**
 
@@ -313,6 +315,8 @@ static inline void trap_dispatch(struct trapframe *tf) {
 ```
 
 **为什么用"是否有符号 < 0"来判断？** 因为 RISC-V 规定 `scause` 的最高位（bit 63）是"中断标志位"：中断时置 1，异常时为 0。把它当成有符号数看，bit63 就是符号位，`< 0` 恰好等价于"这是中断"。这也提醒我们：`tf->cause` 里**混着标志位和编号**，真正的中断号在低 63 位。
+
+#### 2.1 中断处理 `interrupt_handler()`（2412679-钟一成）
 
 **二、实现**
 
@@ -383,6 +387,70 @@ void interrupt_handler(struct trapframe *tf) {
 **六、`ticks` 的生命周期**
 
 `ticks` 定义在 `clock.c`（`volatile size_t ticks;`），`clock_init()` 里在 `clock_set_next_event()` 之后清零。每次时钟中断 +1，每满 100 由 `print_ticks()` 打印一次 `100 ticks`。测试在 `intr_enable()` 之后忙等 `ticks >= 200`，所以只要有一点"没重装"或"分发没命中"，这个循环就永远出不来，QEMU 会在 30 秒后超时——这也是 Test 3 最容易暴露问题的地方。
+
+#### 2.2 异常处理 `exception_handler()`（2412799-葛熠）
+
+**一、模块功能描述**
+
+`trap_dispatch()` 判定 `cause` 最高位为 0 时进入本函数。它要解决三件事：
+
+1. **报告现场**：把异常类型与出错指令地址打出来，供评分脚本匹配、也供人工排查；
+2. **推进 `sepc`**：异常与中断最大的区别是——中断返回后执行的是被打断的**下一条**指令，而异常的 `sepc` 指向**出错的那条指令本身**。若原样 `sret`，CPU 会再次执行同一条指令、再次异常，陷入死循环；
+3. **兜底不静默**：未登记的 `cause` 必须打印完整 trapframe，否则内核卡死后没有任何线索。
+
+**二、实现**
+
+```c
+/* RISC-V 指令长度编码：低 2 位为 0b11 表示 32 位指令，否则是 16 位压缩指令。 */
+static size_t
+instruction_len(uintptr_t epc)
+{
+    uint16_t head = *(volatile uint16_t *)epc;
+    return (head & 0x3) == 0x3 ? 4 : 2;
+}
+
+void exception_handler(struct trapframe *tf) {
+    switch (tf->cause) {
+        case CAUSE_ILLEGAL_INSTRUCTION:                     // 2
+            cprintf("Illegal instruction at 0x%016lx\n", tf->epc);
+            tf->epc += instruction_len(tf->epc);
+            break;
+        case CAUSE_BREAKPOINT:                              // 3
+            cprintf("Breakpoint at 0x%016lx\n", tf->epc);
+            tf->epc += instruction_len(tf->epc);
+            break;
+        default:
+            print_trapframe(tf);
+            break;
+    }
+}
+```
+
+注意这里 `switch (tf->cause)` **没有**像 `interrupt_handler` 那样掩 bit63：异常分支的 `scause` 最高位本来就是 0，直接比编号即可；而且 `CAUSE_ILLEGAL_INSTRUCTION`(2)、`CAUSE_BREAKPOINT`(3) 与中断号 5/1/9 不在同一取值空间，不存在撞车。
+
+**三、三个关键决策**
+
+1. **`sepc` 必须推进，且推进量不能写死 4。**
+   指导书的模板是 `tf->epc += 4`，在本环境下会错。工具链默认 `-march=rv64imafdc`，`ebreak` 会被压缩成 2 字节的 `c.ebreak`（`0x9002`），`+4` 会让 `sepc` 落到下一条指令的**中间**，反汇编出来是乱码，甚至再触发一次非法指令。所以改为读 `epc` 处的 2 字节、看低 2 位是否为 `0b11`（`0b11` = 32 位指令，否则 16 位压缩指令）来定长度——这段升级过程与实测数据记在模块一的「统稿补充」里。
+
+2. **`epc` 用 `0x%016lx` 打印成 16 位带前导 0。**
+   内核地址形如 `0xffffffffc0201234`，若用 `%x`（走 32 位路径）会被截成低 8 位十六进制，看不出这是高半区地址，人工排查时容易误判成物理地址。需要说明的是：评分脚本只 `grep -F "Illegal instruction at"` 这个前缀，所以地址格式**不影响判分**，纯属可读性考虑。
+
+3. **`default` 分支只打印、不推进、不返回。**
+   未登记的异常（例如本实验刻意构造的 `cause=20`）说明内核已处于不可信状态，此时"猜一个推进量继续跑"比停机更糟。所以只 `print_trapframe(tf)` 把 36 个槽位全部倒出来，然后让流程回到 `__trapret`——`sepc` 不变，下一次 `sret` 会再次异常，最终停在同一条指令上，便于用 GDB 接管。评分脚本正是靠这里的 `print_trapframe()` 输出命中 `cause    0x00000014`（20 的十六进制）。
+
+**四、测试覆盖说明（Test 2，25 分）**
+
+| 覆盖点 | 测试手段 | 对应实现 | 结果 |
+|---|---|---|---|
+| 非法指令识别与打印 | `.word 0x0000007b`（RV64 上非法，4 字节） | `case CAUSE_ILLEGAL_INSTRUCTION` + `cprintf` | `Illegal instruction at` 命中 |
+| 非法指令后能返回 | 返回后继续执行到下一个打印 | `tf->epc += instruction_len(epc)` | PASS |
+| 断点的 `sepc` 推进 | `test_lab3_context.S` 的 `ebreak` 之后逐位比对 26 个寄存器 | `case CAUSE_BREAKPOINT` | `Breakpoint at` 命中、Test 1 通过 |
+| 未登记异常的兜底 | 手工构造 `tf.cause = 20` 直接调 `exception_handler` | `default: print_trapframe(tf)` | `cause    0x00000014` 命中 |
+
+**五、这一模块的收获**
+
+最初的写法完全照抄指导书（`epc += 4`），`make grade` 的 Test 1 直接报 `FAIL (register context)`——`test_lab3_register_context()` 返回 1，说明 `ebreak` 之后那段逐位比对没走通。当时第一反应是怀疑 `RESTORE_ALL` 写错了，用 `objdump -d bin/kernel` 反汇编后才发现：`ebreak` 在本环境下只有 2 字节，`+4` 让 `sepc` 落到了下一条指令的中间，"寄存器没恢复对"只是这个错位的表面现象。这件事说明：**异常处理的正确性依赖于对指令编码的理解，而不是"照着模板加个固定值"**；排查顺序也应该是"先 `objdump` 看指令边界，再怀疑软件逻辑"。
 
 ### 思考题
 
@@ -576,12 +644,15 @@ Total Score: 100/100
 | `be15291` | 实现 `interrupt_handler`（时钟重装 / ticks / 关机 / 中断分类） |
 | `92b437b` | 按模板填写模块二报告与提示词 |
 | `6144af9` | 实现 `trapentry.S`（`RESTORE_ALL` / `__alltraps`），修复 `c.ebreak` 并补模块一报告 |
+| `1b55259` | 验收 100/100；`exception_handler` 的 epc 推进由固定 `+4` 升级为按指令编码判断（`instruction_len()`），修正报告数字与注释规范 |
+| `dbc04c6` | 补入 `make qemu` / `make grade` 截图 |
+| `86b70e6` | 新增 `问答准备.md`，补 QEMU 版本坑（7.0 不传 `next_addr` 导致全 0 分） |
 
 **已完成的交付**
 
 - [x] 功能模块一 `RESTORE_ALL` 与 `jal trap`（吕鹏哲）→ Test 1 `PASS (35/35)`
-- [x] 功能模块二 `interrupt_handler`（钟一成）→ Test 2 `PASS (25/25)`、Test 3 `PASS (40/40)`
-- [x] 功能模块二 `exception_handler`（葛熠）→ 非法指令与断点 epc 前进
+- [x] 功能模块二 中断部分 `interrupt_handler`（钟一成）→ Test 2 `PASS (25/25)`、Test 3 `PASS (40/40)`
+- [x] 功能模块二 异常部分 `exception_handler`（葛熠）→ 非法指令与断点的 epc 按指令长度前进
 - [x] lab2 代码回填与工具链兼容修复
 - [x] `make grade` = **100/100**
 - [x] 截图：`report/images/lab3_make_qemu.png`、`report/images/lab3_grade.png`
