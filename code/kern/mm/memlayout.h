@@ -37,6 +37,10 @@
 
 #define PHYSICAL_MEMORY_OFFSET      0xFFFFFFFF40000000
 
+// lab4 补齐：物理地址上界（DRAM_BASE + 允许的最大物理内存）。
+// 对应 KMEMSIZE 的物理侧写法，page_init() 用它裁剪 DTB 报上来的内存范围。
+#define PHYSICAL_MEMORY_END         0x88000000
+
 
 #define KSTACKPAGE          2                           // # of pages in kernel stack
 #define KSTACKSIZE          (KSTACKPAGE * PGSIZE)       // sizeof kernel stack

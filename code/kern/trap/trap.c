@@ -84,6 +84,60 @@ void print_regs(struct pushregs *gpr)
 extern struct mm_struct *check_mm_struct;
 
 //lab3 请补充你在lab3中的代码
+//lab3 2412679（interrupt_handler）/ 2412799（exception_handler）
+
+/* 中断处理：按中断号分发。
+ * scause 最高位为 1 才是"中断"，中断号在低位，所以比较前必须掩掉 bit63。 */
+void interrupt_handler(struct trapframe *tf) {
+    uintptr_t cause = tf->cause & ~((uintptr_t)1 << 63);
+
+    switch (cause) {
+        case IRQ_S_TIMER:
+            /* sbi_set_timer 是一次性闹钟：不重装，下一次中断永远不会再来 */
+            clock_set_next_event();
+            ticks++;
+            if (ticks % TICK_NUM == 0) {
+                print_ticks();
+            }
+            break;
+        case IRQ_S_SOFT:
+            cprintf("Supervisor software interrupt\n");
+            break;
+        case IRQ_S_EXT:
+            cprintf("Supervisor external interrupt\n");
+            break;
+        default:
+            cprintf("Unknown interrupt: cause %d\n", (int)cause);
+            print_trapframe(tf);
+            break;
+    }
+}
+
+/* RISC-V 指令长度编码：低 2 位为 0b11 是 32 位指令，否则是 16 位压缩指令。
+ * lab4 的 CFLAGS 没有关掉 C 扩展，ebreak 会被压成 2 字节 c.ebreak，
+ * 所以 sepc 的推进量必须按真实指令长度算，不能写死 +4。 */
+static size_t
+instruction_len(uintptr_t epc) {
+    uint16_t head = *(volatile uint16_t *)epc;
+    return (head & 0x3) == 0x3 ? 4 : 2;
+}
+
+/* 异常处理：非法指令与断点必须推进 sepc，否则 sret 回来又执行同一条 */
+void exception_handler(struct trapframe *tf) {
+    switch (tf->cause) {
+        case CAUSE_ILLEGAL_INSTRUCTION:
+            cprintf("Illegal instruction at 0x%016lx\n", tf->epc);
+            tf->epc += instruction_len(tf->epc);
+            break;
+        case CAUSE_BREAKPOINT:
+            cprintf("Breakpoint at 0x%016lx\n", tf->epc);
+            tf->epc += instruction_len(tf->epc);
+            break;
+        default:
+            print_trapframe(tf);
+            break;
+    }
+}
 
 
 

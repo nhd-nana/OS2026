@@ -4,6 +4,144 @@
 #include <stdio.h>
 
 //lab2 请补充你在lab2中的代码
+//lab2 2412799 回填：Best-Fit 空闲块管理
+static free_area_t free_area;
+
+#define free_list (free_area.free_list)
+#define nr_free (free_area.nr_free)
+
+static void
+best_fit_init(void) {
+    list_init(&free_list);
+    nr_free = 0;
+}
+
+/* 把 [base, base+n) 挂入空闲链表，链表按地址升序维护 */
+static void
+best_fit_init_memmap(struct Page *base, size_t n) {
+    assert(n > 0);
+    struct Page *p = base;
+    for (; p != base + n; p ++) {
+        assert(PageReserved(p));
+        p->flags = p->property = 0;
+        set_page_ref(p, 0);
+    }
+    base->property = n;
+    SetPageProperty(base);
+    nr_free += n;
+
+    if (list_empty(&free_list)) {
+        list_add(&free_list, &(base->page_link));
+    } else {
+        list_entry_t *le = &free_list;
+        while ((le = list_next(le)) != &free_list) {
+            struct Page *page = le2page(le, page_link);
+            if (base < page) {
+                list_add_before(le, &(base->page_link));
+                break;
+            } else if (list_next(le) == &free_list) {
+                list_add(le, &(base->page_link));
+                break;
+            }
+        }
+    }
+}
+
+/* 在空闲链表里挑出"够用且最小"的块 —— 这就是 Best-Fit 与 First-Fit 的唯一区别 */
+static struct Page *
+best_fit_alloc_pages(size_t n) {
+    assert(n > 0);
+    if (n > nr_free) {
+        return NULL;
+    }
+
+    struct Page *best = NULL;
+    list_entry_t *le = &free_list;
+    while ((le = list_next(le)) != &free_list) {
+        struct Page *p = le2page(le, page_link);
+        if (p->property >= n && (best == NULL || p->property < best->property)) {
+            best = p;
+        }
+    }
+    if (best == NULL) {
+        return NULL;
+    }
+
+    list_entry_t *prev = list_prev(&(best->page_link));
+    list_del(&(best->page_link));
+    if (best->property > n) {
+        // 切掉块首 n 页，剩余部分作为新的空闲块留在原位置之后
+        struct Page *rest = best + n;
+        rest->property = best->property - n;
+        rest->flags = 0;
+        SetPageProperty(rest);
+        set_page_ref(rest, 0);
+        list_add(prev, &(rest->page_link));
+    }
+    nr_free -= n;
+    best->property = 0;
+    ClearPageProperty(best);
+    set_page_ref(best, 0);
+    return best;
+}
+
+static void
+best_fit_free_pages(struct Page *base, size_t n) {
+    assert(n > 0);
+    struct Page *p = base;
+    for (; p != base + n; p ++) {
+        assert(!PageReserved(p) && !PageProperty(p));
+        p->flags = 0;
+        set_page_ref(p, 0);
+    }
+    base->property = n;
+    SetPageProperty(base);
+    nr_free += n;
+
+    if (list_empty(&free_list)) {
+        list_add(&free_list, &(base->page_link));
+    } else {
+        list_entry_t *le = &free_list;
+        while ((le = list_next(le)) != &free_list) {
+            struct Page *page = le2page(le, page_link);
+            if (base < page) {
+                list_add_before(le, &(base->page_link));
+                break;
+            } else if (list_next(le) == &free_list) {
+                list_add(le, &(base->page_link));
+                break;
+            }
+        }
+    }
+
+    // 与前一个空闲块合并
+    list_entry_t *le = list_prev(&(base->page_link));
+    if (le != &free_list) {
+        p = le2page(le, page_link);
+        if (p + p->property == base) {
+            p->property += base->property;
+            ClearPageProperty(base);
+            list_del(&(base->page_link));
+            base = p;
+        }
+    }
+
+    // 与后一个空闲块合并
+    le = list_next(&(base->page_link));
+    if (le != &free_list) {
+        p = le2page(le, page_link);
+        if (base + base->property == p) {
+            base->property += p->property;
+            ClearPageProperty(p);
+            list_del(&(p->page_link));
+        }
+    }
+}
+
+static size_t
+best_fit_nr_free_pages(void) {
+    return nr_free;
+}
 
 // Framework tests: students must not modify basic_check or best_fit_check.
 static void
@@ -137,3 +275,16 @@ best_fit_check(void) {
     #endif
 }
 
+
+/* lab4：pmm.c 的 init_pmm_manager() 用的是 default_pmm_manager，
+ * 而本文件实现的是 Best-Fit 算法，所以这里把 Best-Fit 挂在 default 名下导出，
+ * 检查函数沿用框架给的 best_fit_check。 */
+const struct pmm_manager default_pmm_manager = {
+    .name = "best_fit_pmm_manager",
+    .init = best_fit_init,
+    .init_memmap = best_fit_init_memmap,
+    .alloc_pages = best_fit_alloc_pages,
+    .free_pages = best_fit_free_pages,
+    .nr_free_pages = best_fit_nr_free_pages,
+    .check = best_fit_check,
+};

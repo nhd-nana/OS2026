@@ -34,6 +34,11 @@ CFLAGS  := -mcmodel=medany -O2 -std=gnu99 -Wno-unused
 CFLAGS	+= -fno-builtin -Wall -nostdinc $(DEFS)
 CFLAGS	+= -fno-stack-protector -ffunction-sections -fdata-sections
 CFLAGS	+= -g
+# GCC 14 起 `-Wint-conversion` / `-Wincompatible-pointer-types` 默认是 error。
+# 本实验材料（含 tools/test_lab4.c 的 `void (*)(void *)` 传给
+# `kernel_thread(int (*)(void *), ...)`）是按老编译器写的，会直接编不过，
+# 这里只把这两类降级回警告，不影响其它诊断。
+CFLAGS	+= -Wno-int-conversion -Wno-incompatible-pointer-types
 CTYPE	:= c S
 
 LD      := $(GCCPREFIX)ld

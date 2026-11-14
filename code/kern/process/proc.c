@@ -219,6 +219,75 @@ init_main(void *arg)
 }
 
 //LAB4 function2 YOUR CODE
+/* ===== 占位实现（仅让基线能编译、能启动）=============================
+ * 负责人 2412679 钟一成：请把本块全部替换为 lab4 指导书的真实实现。
+ * 当前行为：alloc_proc 返回 NULL，proc_init 只初始化链表，
+ * 因此 [Test Process Create] 必然失败 —— 这是预期的，不是回归。
+ * 真实实现请按 do_fork 的 7 步顺序落地：
+ *   alloc_proc → setup_kstack → copy_mm → copy_thread
+ *   → 挂 proc_list/hash_list → wakeup_proc → 返回 pid
+ * ================================================================== */
+static struct proc_struct *
+alloc_proc(void) {
+    return NULL;
+}
 
+static int
+copy_mm(uint32_t clone_flags, struct proc_struct *proc) {
+    (void)clone_flags;
+    (void)proc;
+    return 0;
+}
+
+static void
+copy_thread(struct proc_struct *proc, uintptr_t esp, struct trapframe *tf) {
+    (void)proc;
+    (void)esp;
+    (void)tf;
+}
+
+int
+do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf) {
+    struct proc_struct *proc = alloc_proc();
+    if (proc != NULL) {
+        copy_mm(clone_flags, proc);
+        copy_thread(proc, stack, tf);
+    }
+    return -E_NO_MEM;
+}
+
+int
+kernel_thread(int (*fn)(void *), void *arg, uint32_t clone_flags) {
+    (void)fn;
+    (void)arg;
+    return do_fork(clone_flags | CLONE_VM, 0, NULL);
+}
+
+void
+proc_init(void) {
+    list_init(&proc_list);
+    for (int i = 0; i < HASH_LIST_SIZE; i++) {
+        list_init(hash_list + i);
+    }
+    /* TODO(2412679)：alloc_proc 造 idleproc（pid=0、kstack=bootstack、
+     * need_resched=1）；kernel_thread(init_main, "Hello world!!", 0) 造 initproc
+     * （pid=1、set_proc_name(initproc,"init")）；末尾 proc_run(idleproc)。 */
+}
 
 //LAB4 function3 YOUR CODE
+void
+proc_run(struct proc_struct *proc) {
+    /* TODO(2412133 吕鹏哲)：local_intr_save → current=proc、runs++、
+     * pgdir 变了就写 satp（SATP_MODE_SV39 | (pgdir >> RISCV_PGSHIFT)）+ flush_tlb()
+     * → switch_to(&prev->context, &proc->context) → local_intr_restore */
+    current = proc;
+}
+
+void
+cpu_idle(void) {
+    while (1) {
+        if (current != NULL && current->need_resched) {
+            schedule();
+        }
+    }
+}

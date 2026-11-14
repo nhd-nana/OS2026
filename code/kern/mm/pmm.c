@@ -88,6 +88,55 @@ size_t nr_free_pages(void)
 }
 
 //lab2 请补充你在lab2中的代码
+//lab2 2412799 回填：探测物理内存并建立页描述符数组
+/* page_init - detect physical memory and build the page descriptor array */
+static void page_init(void) {
+    // 内核已运行在虚拟地址空间，va = pa + PHYSICAL_MEMORY_OFFSET
+    va_pa_offset = PHYSICAL_MEMORY_OFFSET;
+
+    uint64_t mem_base = get_memory_base();
+    uint64_t mem_size = get_memory_size();
+    if (mem_base == 0 || mem_size == 0) {
+        panic("page_init: invalid physical memory info from DTB");
+    }
+
+    uint64_t mem_end = mem_base + mem_size;
+    if (mem_end > PHYSICAL_MEMORY_END) {
+        // 上界不能超过框架允许管理的物理内存范围
+        mem_end = PHYSICAL_MEMORY_END;
+    }
+    cprintf("phys memory: [0x%016lx, 0x%016lx)\n", mem_base, mem_end);
+
+    // npage 是物理页号的上界（不含）
+    npage = PPN(mem_end);
+    cprintf("npage: 0x%lx\n", (unsigned long)npage);
+
+    extern char end[];
+    // 描述符数组紧跟在内核镜像之后，页对齐
+    pages = (struct Page *)ROUNDUP((uintptr_t)end, PGSIZE);
+
+    size_t page_num = npage - nbase;
+    for (size_t i = 0; i < page_num; i++) {
+        pages[i].ref = 0;
+        pages[i].property = 0;
+        pages[i].flags = 0;
+        SetPageReserved(&pages[i]);  // 先全部标为保留，空闲区由 init_memmap 解封
+    }
+
+    // 空闲区起点：跳过 OpenSBI、内核镜像与描述符数组自身
+    uintptr_t pages_pa = PADDR((uintptr_t)pages);
+    uintptr_t free_start =
+        ROUNDUP(pages_pa + page_num * sizeof(struct Page), PGSIZE);
+
+    if (free_start >= mem_end) {
+        cprintf("page_init: no free page available\n");
+        return;
+    }
+
+    size_t nr_free_page = PPN(mem_end) - PPN(free_start);
+    cprintf("free pages: 0x%lx\n", (unsigned long)nr_free_page);
+    init_memmap(pa2page(free_start), nr_free_page);
+}
 
 static void enable_paging(void)
 {
@@ -221,6 +270,46 @@ struct Page *get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store)
 }
 
 //LAB4 function1 YOUR CODE
+//LAB4 function1 2412799：页表项维护
+// page_insert - 建立或更新 la -> page 的映射
+int page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm) {
+    pte_t *ptep = get_pte(pgdir, la, 1);
+    if (ptep == NULL) {
+        return -E_NO_MEM;
+    }
+
+    // 先把新页的引用计上，再处理旧映射；否则"映射到自己"时会被误释放
+    page_ref_inc(page);
+    if (*ptep & PTE_V) {
+        struct Page *old = pte2page(*ptep);
+        if (old == page) {
+            // 同一页重复映射：只改权限，不额外引用
+            page_ref_dec(page);
+        } else {
+            // 换页：走 page_remove 的删映射 + 减引用 + 必要时释放
+            page_remove(pgdir, la);
+        }
+    }
+
+    *ptep = pte_create(page2ppn(page), perm);
+    tlb_invalidate(pgdir, la);
+    return 0;
+}
+
+// page_remove - 幂等删除 la 上的映射
+void page_remove(pde_t *pgdir, uintptr_t la) {
+    pte_t *ptep = get_pte(pgdir, la, 0);
+    if (ptep == NULL || (*ptep & PTE_V) == 0) {
+        return;  // 没有映射也要安静返回
+    }
+
+    struct Page *page = pte2page(*ptep);
+    *ptep = 0;
+    if (page_ref_dec(page) == 0) {
+        free_page(page);  // 最后一个引用消失才真正释放物理页
+    }
+    tlb_invalidate(pgdir, la);
+}
 
 
 
