@@ -149,6 +149,8 @@ bad_fork_cleanup_proc:   kfree(proc);  goto fork_out;
 3. **`proc_init` 里先 `current = idleproc` 再 `kernel_thread`**：`do_fork` 里 `proc->parent = current`，只有这样 `initproc->parent` 才是 `idleproc`（测试会断言）。
 4. **`proc_init` 末尾没有调 `proc_run(idleproc)`**：`current` 已经是 `idleproc`，测试断言的正是这一点；若 `proc_run` 没有 `proc != current` 守卫，`switch_to` 到 `context` 全 0 的自己会 `ret` 到 0 地址而崩溃。第一次真正的切换留给 `kern_init → cpu_idle → schedule`。
 
+### 功能模块三：进程调度
+
 ### 思考题
 
 **思考题：`get_pte()` 把"查页表项"和"分配页表页"合在一个函数里，这样好吗？有没有必要拆开？**
