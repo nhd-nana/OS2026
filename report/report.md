@@ -151,6 +151,53 @@ bad_fork_cleanup_proc:   kfree(proc);  goto fork_out;
 
 ### 功能模块三：进程调度
 
+**负责人：** 2412133-吕鹏哲
+
+**一、模块功能描述**
+
+模块二造出了 `proc_struct`（idleproc / initproc 及其 PCB、内核栈、首次运行现场），但它们还只是躺在链表里的数据——CPU 仍只有 `kern_init` 这一条执行流，最后停进 `cpu_idle` 死循环。本模块解决的是"**让线程真正上 CPU**"：`cpu_idle` 作为空闲线程持续空转，一旦发现 `need_resched` 就调用 `schedule` 挑一个可运行线程，`proc_run` 更新 `current`、按 Sv39 切页表，最后 `switch_to` 把寄存器现场从旧线程搬到新线程。闭环跑通后，`initproc` 第一次从 `idleproc` 手里接管 CPU，打印出自己的 pid 与 `Hello world!!`。
+
+| 函数 | 文件 | 一句话 |
+|---|---|---|
+| `cpu_idle()` | `proc.c` | 空闲线程主体：死循环，`need_resched` 就 `schedule()` |
+| `schedule()` | `sched.c` | 关中断选出 `PROC_RUNNABLE` 的 next，找不到退回 idleproc |
+| `proc_run(proc)` | `proc.c` | 关中断更新 `current`、切 Sv39 页表、`switch_to` |
+| `switch_to(from, to)` | `switch.S` | 只搬 `ra/sp/s0~s11` 14 个 callee-saved 寄存器，`ret` 到 `to->ra` |
+
+**二、最终提示词**
+
+完整四段式提示词见 `report/prompt.md` 的「功能模块三」。核心约束四条：① 页表切换必须用 `SATP_MODE_SV39 << 60 | (pgdir >> RISCV_PGSHIFT)` 构造 satp 再 `flush_tlb()`，禁止 `lsatp()`（Sv32 遗留）；② `switch_to` 的汇编偏移必须与 `struct context` 的 `ra/sp/s0..s11` 布局逐字段对齐；③ `schedule` 对 `idleproc` 特殊处理——它不在 `proc_list` 里，找不到可运行线程时用它兜底；④ `cpu_idle` 不直接选线程、不碰 `proc_run`/`switch_to`。
+
+**三、实现迭代过程**
+
+实现基本一次通过，没有因编译报错而反复调整提示词。真正花时间的是**读代码对齐三个锚点**，而不是改代码：
+
+1. **satp 的 Sv39 写法**。提示词禁止 `lsatp()`，要求照 `pmm.c::enable_paging()` 写。`enable_paging()` 用的是硬编码 `0x8000000000000000 | (boot_pgdir_pa >> RISCV_PGSHIFT)`，我把它翻译成 `((uintptr_t)SATP_MODE_SV39 << 60) | (proc->pgdir >> RISCV_PGSHIFT)`（`SATP_MODE_SV39 = 8`，`8 << 60 = 0x8000000000000000`）。注意 `SATP_MODE_SV39` 是 `int` 字面量，直接 `<< 60` 会左移越界（UB），必须先 `(uintptr_t)` 强转。
+2. **`switch_to` 的偏移**。`struct context` 14 个字段按 `ra(0) sp(8) s0(16) ... s11(104)` 排列、每个 8 字节；汇编 `sd ra, 0(a0)` 到 `sd s11, 104(a0)` 必须一个不差，漏掉 `s0/fp` 或顺序错位，切过去就是寄存器全乱。
+3. **`schedule` 里 idleproc 不在链表**。`proc_init` 只对 `initproc`（经 `do_fork`）做了 `list_add`，`idleproc` 并不在 `proc_list` 里。所以轮转起点要区分：`current == idleproc` 从表头开始，否则从 `current->list_link` 的下一个开始；扫完没有 `PROC_RUNNABLE` 就 `next = idleproc` 兜底。
+4. **`cpu_idle` 已是正确实现**，只核对不重写（遵守"不顺手改别人代码"）。
+
+唯一一次真实报错发生在**代码之外的环境**：本机原本没有 `riscv64-unknown-elf` 工具链（§0 写的 `/opt/riscv-elf-toolchains` 在本机不存在），且 WSL 实为 Ubuntu 26.04（文档写 22.04），riscv-collab 的 gdb 缺 `libpython3.10`。解决方式是装 GCC 13.2.0 工具链 + 给 gdb 包 wrapper，与模块三代码本身无关，故不展开。
+
+**四、测试覆盖说明**
+
+| 覆盖点 | 测试手段 | 实测 |
+|---|---|---|
+| idle → init 的切换 | `make qemu` 串口出现 `this initproc, pid = 1, name = "init"` | ✅ |
+| `switch_to` 现场迁移 | initproc 三行 `To U` 消息完整打印 | ✅ |
+| `schedule` 轮转公平 | `make grade` 的 `[Test Schedule] PASS`（两个测试线程都跑） | ✅ |
+| `proc_run` 更新 current/切页表 | 同上，整链不崩 | ✅ |
+| 最终评分 | `make grade` | **30/30** |
+
+`make grade` 实测输出：
+
+```text
+  -check PMM:                                OK
+  -check Process Create:                     OK
+  -check Schedule:                           OK
+Total Score: 30/30
+```
+
 ### 思考题
 
 **思考题：`get_pte()` 把"查页表项"和"分配页表页"合在一个函数里，这样好吗？有没有必要拆开？**
@@ -194,6 +241,42 @@ pte_t *get_pte(pde_t *pgdir, uintptr_t la, bool create) {
 - 组合接口保留 `get_pte(pgdir, la, create)`，内部调上面两个。
 
 代价是"创建路径"要多走一遍表，但换来的是：**错误码能区分"不存在"和"没内存"**、查询路径绝对安全、Sv39/Sv48 的层级差异可以用循环而不是复制粘贴。考虑到本实验只有 Sv39 且没有换页压力，保持现状是可接受的；但如果这个内核要继续长到 lab5（缺页处理、`fork` 时复制地址空间），我倾向于先拆。
+
+**思考题：`local_intr_save(intr_flag); ... local_intr_restore(intr_flag);` 是如何实现开关中断的？**
+
+这两句来自 `kern/sync/sync.h`，底层是 `kern/driver/intr.c` 的两个函数：
+
+```c
+// sync.h
+static inline bool __intr_save(void) {
+    if (read_csr(sstatus) & SSTATUS_SIE) {  // 当前中断是开的？
+        intr_disable();                     // 关掉
+        return 1;                           // 记住"原来是开的"
+    }
+    return 0;                               // 原来就是关的
+}
+static inline void __intr_restore(bool flag) {
+    if (flag) intr_enable();                // 原来开才重新打开
+}
+#define local_intr_save(x)    do { x = __intr_save(); } while (0)
+#define local_intr_restore(x) __intr_restore(x);
+
+// intr.c
+void intr_enable(void)  { set_csr(sstatus, SSTATUS_SIE); }   // csrrs：置位
+void intr_disable(void) { clear_csr(sstatus, SSTATUS_SIE); } // csrrc：清零
+```
+
+关键在 **sstatus 的 `SIE` 位**（Supervisor Interrupt Enable，`riscv.h` 里 `SSTATUS_SIE = 0x2`）。RISC-V 中 S 态是否响应中断只看这一位：`SIE=1` 中断开放、`SIE=0` 中断屏蔽。`set_csr`/`clear_csr` 是 `csrrs`/`csrrc` 指令的封装，**原子地**读改写这一位——单条 CSR 指令完成"读旧值 + 改位 + 写回"，不会被中断打断，本身即临界区安全。
+
+整个机制分两步：
+
+1. **`local_intr_save(intr_flag)`**：先读 `sstatus` 看 `SIE` 现在是 0 还是 1。若原来是 1，就 `csrrc` 把 `SIE` 清 0（关中断），并把 `intr_flag` 记成 `1`；若原来就是 0，直接记 `0`、什么都不用做。**效果：这句执行完后中断一定处于关闭状态，同时 `intr_flag` 记住了"进入临界区之前中断是开还是关"。**
+
+2. **`local_intr_restore(intr_flag)`**：看 `intr_flag`——只有 save 时它是 `1`（原来开着），才 `csrrs` 把 `SIE` 重新置 1（恢复中断）；是 `0` 就什么都不做。**效果：把中断状态精确还原成进入临界区之前的样子。**
+
+**为什么不能简单地"save 关、restore 开"？** 因为临界区可能**嵌套**：如果外层已经关过中断，内层再 `local_intr_save` 时 `SIE` 已经是 0，此时若 restore 无条件开中断，就会把"本该一直关着"的中断错误打开，破坏外层临界区的原子性。用 `intr_flag` 记住原始状态，才能保证**每一对 save/restore 只负责自己这一段、不影响外层**——这正是"保存/恢复现场"而不是"无条件开关"的意义。
+
+这也是 `schedule()`、`proc_run()`、`do_fork()` 都要用它包住共享数据（`proc_list`、`current`、页表）的原因：选线程、改 `current`、切页表、`switch_to` 这一串动作中间不会被时钟中断插进来，从而保证 `current`、页表和实际执行现场三者一致。
 
 ## 五、测试与验证
 

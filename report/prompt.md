@@ -99,3 +99,93 @@ void        proc_init(void);
   -check Schedule:                           WRONG
 Total Score: 20/30
 ```
+
+---
+
+## 功能模块三：进程调度与上下文切换（`proc.c` / `sched.c` / `switch.S`）
+
+**负责**：2412133-吕鹏哲
+
+### 生成实现的提示词
+
+[PROMPT]
+实现内核线程真正交给 CPU 执行的调度与上下文切换模块，使系统不仅能创建 `proc_struct` 线程对象，还能让 `initproc` 从 `idleproc` 手中接管 CPU。核心闭环：`cpu_idle()` 空闲等待调度需求 → `schedule()` 选择下一个可运行线程 → `proc_run()` 更新 current、切换页表并触发底层切换 → `switch_to()` 保存旧线程寄存器现场并恢复新线程寄存器现场。
+
+改哪里：
+1. `kern/process/proc.c`：`cpu_idle`、`proc_run`
+2. `kern/schedule/sched.c`：`schedule`
+3. `kern/process/switch.s`：`switch_to`
+
+怎么改：
+- `cpu_idle()` 作为空闲线程执行主体持续循环；检测到 `need_resched` 时调用 `schedule()`，自身不直接选线程、不直接调 `proc_run()`/`switch_to()`。
+- `schedule()` 在关中断临界区内从进程链表选出 `PROC_RUNNABLE` 线程；找不到退回 `idleproc`；清理调度标志后调 `proc_run(next)`。
+- `proc_run()` 在关中断临界区内保存旧 `current`、更新 `current`、按 Sv39 写 `satp` + `flush_tlb()`，调 `switch_to(&prev->context, &proc->context)`；**不得用 `lsatp()`**（Sv32 遗留），参照 `pmm.c::enable_paging()`。
+- `switch_to()` 仅保存/恢复 `ra、sp、s0~s11`，`ret` 跳到 `to->ra`（首跑即 `forkret`）。
+- 用 `local_intr_save()/local_intr_restore()` 保护关键区，保证 current、页表、执行现场一致。
+
+[RELY]
+
+| 依赖 | 位置 | 提供什么 |
+|---|---|---|
+| `SATP_MODE_SV39` / `RISCV_PGSHIFT` / `PROC_RUNNABLE` | `riscv.h` / `proc.h` | satp 模式位、页大小移位、可运行态 |
+| `struct proc_struct` / `struct context` | `proc.h` | PCB；`context` 是 `ra/sp/s0~s11` 14 个 callee-saved |
+| `read_csr` / `write_csr` / `flush_tlb` | `riscv.h` / `pmm.h` | 读写 CSR、刷 TLB |
+| `boot_pgdir_pa` / `enable_paging()` | `pmm.c` | Sv39 satp 的参考写法 |
+| `proc_list` / `current` / `idleproc` / `need_resched` / `runs` | `proc.c` | 进程链表与调度状态 |
+| `local_intr_save/restore` | `sync.h` | 关中断保护 |
+| `list_next()` / `le2proc()` | `list.h` / `proc.h` | 遍历进程链表 |
+| `forkret` / `forkrets` / `__trapret` | `proc.c` / `trapentry.S` | 新线程首次运行恢复链路 |
+
+明确禁止：`lsatp()`（Sv32 遗留，表达不了 Sv39）。
+
+[GUARANTEE]
+
+```c
+void cpu_idle(void);                              // kern/process/proc.c
+void schedule(void);                              // kern/schedule/sched.c
+void proc_run(struct proc_struct *proc);          // kern/process/proc.c
+void switch_to(struct context *from, struct context *to);  // kern/process/switch.s
+```
+
+签名不可改。
+
+[SPECIFICATION]
+
+- **`cpu_idle`**：不返回的死循环；每轮查 `current->need_resched`，需要就 `schedule()`，否则空转；不选线程、不调 `proc_run`/`switch_to`、不改 `current`。
+- **`schedule`**：`local_intr_save` → `current->need_resched = 0` → 用 `list_next`+`le2proc` 从 `proc_list` 找 `PROC_RUNNABLE` 的 next（current 是 idleproc 从表头、否则从 current 下一个轮转）→ 找不到 `next = idleproc` → `next != current` 才 `proc_run(next)` → `local_intr_restore`。
+- **`proc_run`**：`proc != current` 才切换；`local_intr_save` → `prev = current` → `current = proc` → `pgdir` 变了就 `write_csr(satp, SATP_MODE_SV39<<60 | pgdir>>RISCV_PGSHIFT)` + `flush_tlb()` → `switch_to(&prev->context, &proc->context)` → `local_intr_restore`。
+- **`switch_to`**：a0=from、a1=to；`sd ra,0(a0)`…`sd s11,104(a0)` 存 14 个 callee-saved，再 `ld` 从 a1 恢复同名寄存器，`ret`；不碰 caller-saved、CSR、调度状态。
+
+### 生成测试的提示词
+
+[PROMPT]
+不另写测试，用课程自带的 `make grade` 验收。先读 `tools/test_lab4.c`（`test_lab4_schedule` 会 `kernel_thread` 造两个线程、各置 `need_resched` 并反复调 `schedule`，最后断言两个线程都跑过）、`tools/inject.py`（把三个测试注入 `pmm_init` 末尾 / `proc_init` 末尾 / `init_main` 开头）、`tools/grade.sh`（只起一次 QEMU，用 `grep -F` 固定串判分）。实现前先把 `test_lab4_schedule` 的断言当成规格，而不是先写代码再猜测试。
+
+[GUARANTEE]
+测试只看串口字符串与 `assert` 是否触发。
+
+[SPECIFICATION]
+- 通过条件：`make grade` 输出 `Total Score: 30/30`，且 `check Schedule: OK`。
+- `check Schedule` 额外要求三行：`this initproc, pid = 1, name = "init"`、`To U: "Hello world!!".`、`To U: "en.., Bye, Bye. :)"`。
+- 失败形态 1：切过去就崩 / 跳到 0 地址 → `switch_to` 偏移与 `struct context` 没对齐。
+- 失败形态 2：两个测试线程都跑不到 → `schedule` 没从 current 下一个轮转或没兜底 idleproc。
+- 失败形态 3：`satp` 写错 → 页表切换后立刻缺页崩。
+
+### 测试覆盖说明
+
+| 覆盖点 | 测试手段 | 实测 |
+|---|---|---|
+| idle → init 首次切换 | 串口出现 `this initproc, pid = 1, name = "init"` | ✅ |
+| `switch_to` 现场迁移 | 三行 `To U` 消息完整打印 | ✅ |
+| `schedule` 轮转公平 | `[Test Schedule] PASS`（两个线程都跑） | ✅ |
+| `proc_run` 更新 current/切页表 | 整链不崩 | ✅ |
+| 最终评分 | `make grade` | ✅ 30/30 |
+
+实测（2026-11-18）：
+
+```text
+  -check PMM:                                OK
+  -check Process Create:                     OK
+  -check Schedule:                           OK
+Total Score: 30/30
+```

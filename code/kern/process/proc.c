@@ -397,13 +397,25 @@ proc_init(void)
      * kern_init -> cpu_idle -> schedule。 */
 }
 
-//LAB4 function3 YOUR CODE
+//LAB4 function3 2412133
 void
 proc_run(struct proc_struct *proc) {
-    /* TODO(2412133 吕鹏哲)：local_intr_save → current=proc、runs++、
-     * pgdir 变了就写 satp（SATP_MODE_SV39 | (pgdir >> RISCV_PGSHIFT)）+ flush_tlb()
-     * → switch_to(&prev->context, &proc->context) → local_intr_restore */
-    current = proc;
+    if (proc != current) {
+        bool intr_flag;
+        struct proc_struct *prev = current;
+        local_intr_save(intr_flag);
+        {
+            current = proc;
+            // 页表变了才重写 satp：Sv39 模式位 + 页表根物理页号，再刷 TLB
+            if (proc->pgdir != prev->pgdir) {
+                write_csr(satp, ((uintptr_t)SATP_MODE_SV39 << 60) |
+                                    (proc->pgdir >> RISCV_PGSHIFT));
+                flush_tlb();
+            }
+            switch_to(&(prev->context), &(proc->context));
+        }
+        local_intr_restore(intr_flag);
+    }
 }
 
 void
