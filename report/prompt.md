@@ -11,6 +11,87 @@
 
 ---
 
+## 功能模块一：虚拟内存页操作（`pmm.c`）
+
+**负责**：2412799-葛熠
+
+### 生成实现的提示词
+
+[PROMPT]
+在 `kern/mm/pmm.c` 的 `//LAB4 function1 YOUR CODE`（`get_page()` 之后、`tlb_invalidate()` 之前）实现两个函数，其余文件一律不动：
+
+1. `int page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm)`——建立或更新 `la → page` 的映射；
+2. `void page_remove(pde_t *pgdir, uintptr_t la)`——删除 `la` 上的映射。
+
+要求：
+
+- `page_insert` 用 `get_pte(pgdir, la, 1)`；返回 `NULL` 时返回 `-E_NO_MEM`，**不得留下半完成映射**。
+- **必须先 `page_ref_inc(page)`，再处理旧映射**：旧映射指向同一页时只改权限并退掉多余引用；指向别的页时走 `page_remove`。
+- `page_remove` 用 `get_pte(pgdir, la, 0)`；`ptep == NULL` 或 `(*ptep & PTE_V) == 0` 时**直接返回**（幂等，不能把"未映射"当异常）。
+- 删除时先 `*ptep = 0`，再 `page_ref_dec`，**只有减到 0 才 `free_page`**。
+- 两处改完 PTE 都要 `tlb_invalidate(pgdir, la)`。
+
+禁止：不改 `get_pte`、`tlb_invalidate`、`check_pgdir`/`check_boot_pgdir`、`pmm.h` 声明，不新增文件。
+
+[RELY]
+
+| 依赖 | 位置 | 提供什么 |
+|---|---|---|
+| `get_pte(pgdir, la, create)` | `pmm.c` | 定位/创建页表项；`create=1` 可能分配中间级页表页故可能失败 |
+| `pte_create(ppn, type)` | `pmm.h` | 拼 PTE，**内部已 OR 上 `PTE_V`** |
+| `pte2page` / `page2ppn` | `pmm.h` | PTE ↔ Page 互转；`pte2page` 见到 `!PTE_V` 会 panic |
+| `page_ref` / `page_ref_inc` / `page_ref_dec` / `set_page_ref` | `pmm.h` | 引用计数 |
+| `alloc_page` / `free_page` | `pmm.h` | 物理页分配释放 |
+| `tlb_invalidate` / `flush_tlb` | `pmm.c` / `pmm.h` | `sfence.vma la` / 全刷 |
+| `PTE_V/PTE_U/PTE_W/PTE_R` | `mmu.h` | 权限位 |
+| `struct Page` / `boot_pgdir_va` | `memlayout.h` / `pmm.c` | 页描述符、启动页表 |
+
+[GUARANTEE]
+
+```c
+int  page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm);
+void page_remove(pde_t *pgdir, uintptr_t la);
+```
+
+签名与 `pmm.h:46-47` 完全一致（对照 `check_pgdir()` 的调用点），返回值 `0` / `-E_NO_MEM`。
+
+[SPECIFICATION]
+
+- Pre（`page_insert`）：`pgdir` 是页表根的内核虚拟地址；`la` 已页对齐；`page` 引用计数 ≥ 0。
+- Post（成功）：`get_pte(...,0)` 能取到该项，`pte2page(*ptep) == page`，权限等于 `perm`，`page_ref` 恰好 +1。
+- Post（失败）：返回 `-E_NO_MEM`，且**原映射、引用计数、空闲页数都不变**。
+- Case 1（新地址）：`!PTE_V` → 直接写 PTE。
+- Case 2（同页改权限）：`pte2page(*ptep) == page` → 只换权限，**`nr_free_pages()` 不变**。
+- Case 3（换页）：旧页 ≠ 新页 → 旧页走 `page_remove`。
+- Pre/Post（`page_remove`）：任意 `la` 都可调用；有映射则删并减引用（减到 0 释放），无映射则无副作用；**幂等**。
+
+### 生成测试的提示词
+
+[PROMPT]
+不要自己写测试。本模块的验收复用框架自带的 `check_pgdir()` / `check_boot_pgdir()` 与评分脚本的 `test_lab4_pmm_basic()`，请只读它们的断言，列出我的实现必须满足的每一条，并逐条说明对应到哪个分支。
+
+[RELY]
+`kern/mm/pmm.c` 的 `check_pgdir()`、`check_boot_pgdir()`；`tools/test_lab4.c` 的 `test_lab4_pmm_basic()`；`tools/grade.sh` 的 `check PMM` 一条。
+
+[GUARANTEE]
+输出一张"断言 → 实现分支"的对照表，不需要新增任何测试文件。
+
+[SPECIFICATION]
+覆盖：基本建立 / 权限位落盘 / 同址换页 / 同页改权限不多占页 / 幂等删除 / 引用归零才释放；每条给出断言原文与所在函数。
+
+### 测试覆盖说明
+
+| 覆盖点 | 断言来源 | 对应分支 |
+|---|---|---|
+| 基本建立映射 | `assert(pte2page(*ptep) == p1)` | `get_pte(create=1)` + `pte_create` |
+| 权限位落盘 | `assert(*ptep & PTE_U)`、`assert(*ptep & PTE_W)` | `perm` 原样传入 |
+| 同址换页 | `assert(page_ref(p2) == 0)` | `old != page` → `page_remove` |
+| 同页改权限不多占页 | `assert(page_ref(p3) == 1 && nr_free_pages() == free_before)` | `old == page` → `page_ref_dec` |
+| 幂等删除 | 连续两次 `page_remove(2*PGSIZE)` | 先判 `PTE_V` 再删 |
+| 引用归零才释放 | 三次 `page_remove` 后 `page_ref == 0` | `page_ref_dec(...) == 0` 才 `free_page` |
+
+---
+
 ## 功能模块二：进程创建及初始化（`proc.c`）
 
 **负责**：2412679-钟一成

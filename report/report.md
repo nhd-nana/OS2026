@@ -18,17 +18,214 @@
 
 ## 一、实验目的
 
+来自指导书，三条：
+
+1. 了解**虚拟内存管理的基本结构**，掌握虚拟内存的组织与管理方式；
+2. 了解**内核线程创建/执行**的管理过程；
+3. 了解内核线程的**切换和基本调度**过程。
+
+落到代码上，就是让内核从 lab3 的"能被打断并原样恢复"再往前走一步——从**只有一个执行流**
+变成"能造出多个执行实体、登记它们、并让它们轮流占用 CPU"：
+
+```
+lab3 结束：kern_init 一条路跑到底，最后停在 cpu_idle 死循环
+lab4 目标：kern_init → proc_init 造出 idleproc/initproc
+                     → cpu_idle 触发调度 → schedule 选一个 → switch_to 换现场
+                     → init_main 真正跑起来，打印自己的 pid 和名字
+```
+
 ## 二、实验环境
+
+| 项 | 值 |
+|---|---|
+| 宿主机 | Windows 11 + WSL2（Ubuntu 22.04） |
+| 交叉工具链 | `riscv64-unknown-elf-gcc 15.1.0`、GDB 16.3（`/opt/riscv-elf-toolchains/bin`） |
+| 模拟器 | 本地编译的 **QEMU 4.1.1**（`~/opt/qemu-4.1.1/bin/qemu-system-riscv64`），自带 OpenSBI v0.4 |
+| 构建命令 | 在 `<仓库根>/code` 下 `make`、`make qemu`、`make grade` |
+
+**为什么必须 4.1.1**：`Makefile` 的 `qemu`/`debug` 与 `tools/grade.sh` 都用
+`-device loader,file=bin/ucore.img,addr=0x80200000`，靠 QEMU 的 virt 机器把 `next_addr` 传给 OpenSBI。
+系统里若装了 QEMU 7.0 并排在 PATH 前面，它**不传这个值**，固件直接跳到 `0x0`，
+表现是 `make grade` **不报错但 0 分**、串口日志只有 OpenSBI banner。用 `which qemu-system-riscv64`
+确认版本再跑。
+
+**四处工具链兼容修复**（材料按更老的编译器写的，不改根本编不过）：
+
+| 报错 | 原因 | 改法 |
+|---|---|---|
+| `fatal error: best_fit_pmm.h: No such file or directory` | 材料里 `default_pmm.c:3` include 了这个头，却没提供文件 | 自建同名头，只声明 `default_pmm_manager` |
+| `'PHYSICAL_MEMORY_END' undeclared` | lab4 的 `memlayout.h` 缺这个宏（lab3 也踩过） | 补 `#define PHYSICAL_MEMORY_END 0x88000000` |
+| `kmalloc.c:92 error: passing argument 1 of 'kva2page' makes pointer from integer` | GCC 14 起 `-Wint-conversion` 默认是 error；`__slob_free_pages(unsigned long kva)` 把整数直接喂给要指针的 `kva2page` | `kva2page((void *)kva)` |
+| `test_lab4.c: error: passing argument 1 of 'kernel_thread' from incompatible pointer type` | 评分测试的线程函数是 `void (*)(void *)`，而 `kernel_thread` 要 `int (*)(void *)`；GCC 14 起默认为 error | `CFLAGS` 加 `-Wno-int-conversion -Wno-incompatible-pointer-types`。**不改评分测试文件**，换任何一份 `test_lab4.c` 都能编过 |
+
+> 组内环境不完全一致：一位成员的本机 WSL 是更新版本、且需要自备 GCC 13.2.0 工具链
+> （riscv-collab 预编译的 gdb 缺 `libpython3.10`），其记录见功能模块三的"实现迭代过程"。
+> 上面这张表是课程材料与新版编译器之间的差异，与具体机器无关。
 
 ## 三、实验整体逻辑分析
 
 ### 3.1 本章节的逻辑主线
 
+指导书的执行链可以概括成一行：
+
+```
+kern_init → pmm_init → pic_init/idt_init → vmm_init → proc_init → cpu_idle
+                                                                     ↓
+                                                  schedule → proc_run → switch_to
+```
+
+**前半段把地址空间准备好，后半段让第一个可运行线程真正跑起来。** 换成"要解决什么问题"的顺序，是这样四步：
+
+1. **先在页表上能挂页**（模块一）。`vmm_init()` 里的 `check_vma_struct()` 只验证 VMA 链表的插入/查找，
+   但"一个线性地址究竟映射到哪一页物理内存"这件事，在 lab4 之前根本没有实现——
+   `page_insert`/`page_remove` 只有声明（`pmm.h:46-47`），实现是空的。没有这两个函数，
+   页表测试 `check_pgdir()`/`check_boot_pgdir()` 编译都过不了，后面更谈不上给线程准备地址空间。
+2. **再造出执行实体**（模块二）。有了 PCB、内核栈、trapframe，才有"线程"这个东西存在。
+   这一步的关键不是分配内存，而是回答**"新线程第一次从哪里开始跑"**——
+   答案是一条预先构造好的 trapframe：`epc = kernel_thread_entry`、`s0 = fn`、`s1 = arg`。
+3. **再让实体上 CPU**（模块三）。`schedule` 负责**选谁**，`proc_run` 负责**登记 + 切页表**，
+   `switch_to` 负责**搬寄存器**。三者职责严格分离，任何一环错都表现为"切过去就崩"。
+4. **最后用两条官方测试闭环**：`make qemu` 里看到 `this initproc, pid = 1, name = "init"` 与三行 `To U`，
+   证明"造出来 → 切过去 → 跑起来"整条链是通的；`make grade` 30/30 证明三个模块各自达标。
+
+整章的难点其实集中在一个交汇点上——**`forkret → forkrets → __trapret → kernel_thread_entry`
+这条"首次运行链路"**。它跨越模块二（构造 trapframe、设 `context.ra`）与模块三（`switch_to` 的 `ret`
+落到 `ra`），两边字段对不上就崩，所以是分工之后必须联调的地方。
+
 ### 3.2 功能的逐步实现
+
+我们按"能编译 → 能启动 → 能造线程 → 能切换"四级推进，每一级都有明确的判据：
+
+1. **回填 lab2 + lab3**（葛熠）。指导书明确写了"本实验依赖实验2/3"。不搬 `page_init` 与 Best-Fit，
+   `npage`/`pages[]`/空闲链表全是空的；不搬 `interrupt_handler`/`exception_handler`/`RESTORE_ALL`，
+   `trap.c` 与 `trapentry.S` 直接编译失败。这一级完成后的判据是：**`make` 通过、`make qemu` 能看到 `check_*` 全过**。
+2. **写 `page_insert`/`page_remove`**（模块一）。完成后的判据是 `check_pgdir() succeeded!`——
+   这个框架自带的检查会反复 `page_insert`/`page_remove` 并断言引用计数，等于免费给了我们一份验收。
+   `make grade` 此时 **10/30**（`check PMM: OK`）。
+3. **写模块二的六个函数**（钟一成）。判据是 `[Test Process Create] PASS`，总分 **20/30**。
+   注意这条测试注入在 `proc_init()` 末尾，只断言 `current` 与两个 PCB 的字段，
+   所以它**不需要** `switch_to` 真正实现。
+4. **写模块三的四个函数**（吕鹏哲）。判据是 `[Test Schedule] PASS` + 运行时三行 `To U` 消息，总分 **30/30**。
+5. **统稿与取证**（葛熠）。三份文档、报告两万字、`make qemu`/`make grade` 截图。
+
+一个实际观察：**四步之间是"编译依赖"而不是"逻辑依赖"**。模块一不做，`pmm.h` 里的声明没人实现，
+链接就过不了；但模块二、三之间只靠 `proc.h` 已有声明通信，可以并行。
+这也是我们把三个模块一人一个分下去的前提。
+
 
 ## 四、实验内容与实现
 
 ### 功能模块一：虚拟内存页操作
+
+**负责人：** 2412799-葛熠
+
+**一、模块功能描述**
+
+在已有的 Sv39 三级页表框架上，补上最基础的两个动作：**把物理页挂到指定线性地址上**（`page_insert`）、
+**把已有映射安全地撤销掉**（`page_remove`）。
+
+这两个函数看起来小，但它们是"虚拟内存"真正落地的地方——`vmm.c` 里的 `mm_struct`/`vma_struct`
+只描述"地址区间属于谁、有什么权限"，真正决定"这个线性地址对应哪一页物理内存"的，是页表项；
+而修改页表项的唯一入口就是这两个函数。它们的正确性同时牵动三样东西：
+
+| 要同步的东西 | 不同步会怎样 |
+|---|---|
+| 页表项内容 | 映射不到位，或改了权限却仍是旧值 |
+| 物理页引用计数 `page->ref` | 少加会提前释放（别人还在用），多加会永久泄漏 |
+| TLB | 页表改了但 CPU 仍用旧翻译，测试"看似已更新"却读到旧数据 |
+
+本模块完成后，`check_pgdir()`、`check_boot_pgdir()` 才可能通过，
+后续"给线程准备地址空间"（lab5 的 `copy_mm`）才有基础。
+
+**二、实现**
+
+```c
+// page_insert - 建立或更新 la -> page 的映射
+int page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm) {
+    pte_t *ptep = get_pte(pgdir, la, 1);       // create=1：中间级页表页缺了就分配
+    if (ptep == NULL) {
+        return -E_NO_MEM;                     // 分配失败要干净退出，不留半完成映射
+    }
+
+    page_ref_inc(page);                       // 先加引用
+    if (*ptep & PTE_V) {
+        struct Page *old = pte2page(*ptep);
+        if (old == page) {
+            page_ref_dec(page);               // 同一页重映射：只改权限，不多占引用
+        } else {
+            page_remove(pgdir, la);           // 换页：删旧映射 + 减引用（必要时释放）
+        }
+    }
+
+    *ptep = pte_create(page2ppn(page), perm); // pte_create 内部已 OR 上 PTE_V
+    tlb_invalidate(pgdir, la);
+    return 0;
+}
+
+// page_remove - 幂等删除 la 上的映射
+void page_remove(pde_t *pgdir, uintptr_t la) {
+    pte_t *ptep = get_pte(pgdir, la, 0);      // create=0：没映射就返回 NULL，绝不分配
+    if (ptep == NULL || (*ptep & PTE_V) == 0) {
+        return;                               // 幂等：没有映射也要安静返回
+    }
+
+    struct Page *page = pte2page(*ptep);
+    *ptep = 0;                                // 先清项，再减引用
+    if (page_ref_dec(page) == 0) {
+        free_page(page);                      // 最后一个引用消失才真正释放物理页
+    }
+    tlb_invalidate(pgdir, la);
+}
+```
+
+**三、最终提示词（四段式摘要，完整版见 `report/prompt.md`）**
+
+| 段 | 本模块写的内容 |
+|---|---|
+| `[PROMPT]` | 只补 `//LAB4 function1 YOUR CODE` 处的两个函数；点名"必须先 `page_ref_inc` 再处理旧映射""`page_remove` 必须幂等""失败不得留下半完成映射" |
+| `[RELY]` | `get_pte`、`pte_create`（**内部已 OR 上 `PTE_V`**）、`pte2page`、`page_ref_inc/dec`、`free_page`、`tlb_invalidate`、`PTE_*` 宏 |
+| `[GUARANTEE]` | 两个函数的签名与 `pmm.h` 声明完全一致，返回值 `0` / `-E_NO_MEM` |
+| `[SPECIFICATION]` | 三个 Case：新地址 / 同页改权限（`nr_free_pages()` 不变）/ 换页；`page_remove` 对任意 `la` 幂等 |
+
+**为什么这四条缺一不可**：只写 `[PROMPT]` 时，最容易生成"先 remove 再 inc"的顺序错误——
+它在"新地址"和"换页"两个 Case 下都对，只在"同页改权限"时把页释放掉，而这一条恰恰是测试里唯一一个
+断言 `nr_free_pages()` 不变的地方。把 Case 写进 `[SPECIFICATION]`，才能一次生成对。
+
+**四、三个关键决策**
+
+1. **`page_ref_inc` 必须放在"处理旧映射"之前。**最容易写错的顺序是"先看旧项、不同就 `page_remove`、最后 `page_ref_inc`新页"。
+   当新旧是**同一个页**时（测试里就有这个 case：`page_insert(p3, 2*PGSIZE, 0)` 之后
+   再 `page_insert(p3, 2*PGSIZE, PTE_W)`），先 remove 会把引用减到 0 直接 `free_page`，
+   再 insert 就用到了一块已经归还的页。所以先 `inc`、再判"是不是同一页"，同一页就把多余的 `inc` 退掉。
+   `test_lab4_pmm_basic()` 里正好有两条断言在守这个：
+   `assert(page_ref(p3) == 1 && nr_free_pages() == free_before)`——**权限变了，页数不能变**。
+
+2. **`page_remove` 必须幂等。**
+   测试里连续调了两次 `page_remove(boot_pgdir_va, 2 * PGSIZE)`，第二次此时 PTE 已经是 0。
+   如果实现里直接 `pte2page(*ptep)`，`pte2page` 内部见到 `!PTE_V` 会 `panic`——
+   所以必须先判 `(*ptep & PTE_V) == 0` 就返回。这也是"删除接口不该把未映射当异常"的原因。
+
+3. **`get_pte(..., 0)` 与 `get_pte(..., 1)` 的区别决定了能不能失败。**
+   `page_insert` 用 `create=1`，可能因分配页表页失败而返回 `NULL`，所以要能返回 `-E_NO_MEM`；
+   `page_remove` 用 `create=0`，不可能分配、也就不会失败，返回 `NULL` 只表示"这里没有页表"。
+
+**五、测试覆盖说明（Test PMM，10 分）**
+
+| 覆盖点 | 测试手段 | 对应实现 | 结果 |
+|---|---|---|---|
+| 基本建立映射 | `page_insert(p1, 0)` 后查 PTE 与引用计数 | `get_pte(create=1)` + `pte_create` | PASS |
+| 权限位落盘 | `page_insert(p2, PGSIZE, PTE_U\|PTE_W)` | `perm` 原样传进 `pte_create` | PASS |
+| 同址换页 | 用 `p1` 覆盖 `p2` 在 `PGSIZE` 的映射 | 先 `page_ref_inc` 再 `page_remove` 旧页 | `page_ref(p2)==0` PASS |
+| 同页改权限不多占页 | `page_insert(p3, 2*PGSIZE, PTE_W)` 覆盖自己 | `old == page` 分支退掉多余引用 | `nr_free_pages()` 不变 PASS |
+| 幂等删除 | 对 `2*PGSIZE` 连续 `page_remove` 两次 | 先判 `PTE_V` 再删 | PASS |
+| 引用归零才释放 | 三次 `page_remove` 后三个页引用都为 0 | `page_ref_dec(...) == 0` 才 `free_page` | PASS |
+
+**六、这一模块的收获**
+
+写起来只有二十行，但**每一行都在和一个具体的失败模式对应**。最有价值的一条经验是：
+`check_pgdir()` 这个框架自带的检查，本身就是一份相当严格的验收脚本
+（它断言了 `page_ref` 序列、`PTE_U`/`PTE_W` 位、甚至 `nr_free_pages()` 的回归），
+所以模块一不需要自己写测试——**先把框架的 `check_*` 跑通，等于先把主路径钉死**。
 
 ### 功能模块二：进程创建及初始化
 
@@ -282,30 +479,146 @@ void intr_disable(void) { clear_csr(sstatus, SSTATUS_SIE); } // csrrc：清零
 
 ### 5.1 运行结果（`make qemu`）
 
+![make qemu 串口输出](images/lab4_make_qemu.png)
+
+```text
+(THU.CST) os is loading ...
+
+Special kernel symbols:
+  entry  0xc020004a (virtual)
+  etext  0xc0203c18 (virtual)
+  edata  0xc0209030 (virtual)
+  end    0xc020d4e8 (virtual)
+Kernel executable memory footprint: 54KB
+memory management: best_fit_pmm_manager
+phys memory: [0x0000000080000000, 0x0000000088000000)
+npage: 0x88000
+free pages: 0x7bf2
+check_alloc_page() succeeded!
+check_pgdir() succeeded!
+check_boot_pgdir() succeeded!
+check_vma_struct() succeeded!
+check_vmm() succeeded.
+++ setup timer interrupts
+this initproc, pid = 1, name = "init"
+To U: "Hello world!!".
+To U: "en.., Bye, Bye. :)"
+kernel panic at kern/process/proc.c:209:
+    process exit!!.
+```
+
+逐段看：
+
+| 输出 | 说明 |
+|---|---|
+| `memory management: best_fit_pmm_manager` | lab2 回填生效，物理内存管理器是 Best-Fit |
+| `npage: 0x88000` / `free pages: 0x7bf2` | 物理页号上界 0x88000（2 GiB / 4 KiB），可用空闲页 31730 个 |
+| `check_alloc_page()` ~ `check_vmm()` | lab2 的四项自检全部通过，**其中 `check_pgdir()` 就是在验证模块一的 `page_insert`/`page_remove`** |
+| `++ setup timer interrupts` | lab3 回填生效，时钟中断装好 |
+| `this initproc, pid = 1, name = "init"` | **模块二 + 模块三的分界线**：能打印这一行，说明 `switch_to` 已经从 idleproc 切到 initproc，`RESTORE_ALL` 从人工构造的 trapframe 恢复成功，`sret` 跳到了 `kernel_thread_entry` |
+| `To U: "Hello world!!".` / `To U: "en.., Bye, Bye. :)"` | `kernel_thread(init_main, "Hello world!!", 0)` 的参数传递正确（`s1 → a0`） |
+| `panic: process exit!!.` | `init_main` 返回后 `kernel_thread_entry` 调 `do_exit()`，而 lab4 的 `do_exit` 还是框架的 `panic`——**属预期**，指导书不要求本实验实现进程退出（lab5 才做） |
+
+> 注意 lab4 运行时看不到 `100 ticks`：从 `kern_init` 到 `init_main` 返回再到 panic 全程远小于一个 10 ms 的
+> 时钟周期，进程就退出了。这不代表时钟中断没工作——`make grade` 的 Test 3 会真的等下去。
+
 ### 5.2 自动评分（`make grade`）
 
-本模块的验收点是 **Test Process Create**（10 分），注入在 `proc_init()` 末尾，断言：
+![make grade 最终结果](images/lab4_grade.png)
 
-- `current == idleproc`、`idleproc->pid == 0`、`state == PROC_RUNNABLE`、`kstack == bootstack`、`parent == NULL`、`mm == NULL`、`tf == NULL`、`runs == 0`、`flags == 0`、`context.ra == 0`
-- `initproc->pid == 1`、`parent == idleproc`、`mm == NULL`、`context.ra != 0 && context.sp != 0`
-
-实测：
+最终实测：
 
 ```text
   -check PMM:                                OK
   -check Process Create:                     OK
-  -check Schedule:                           WRONG
-Total Score: 20/30
+  -check Schedule:                           OK
+Total Score: 30/30
 ```
 
-`check PMM` 是功能模块一（葛熠），`check Process Create` 是本模块，`check Schedule` 属于功能模块三（吕鹏哲，尚未合并）。**20/30 中属于本模块的 10 分已经拿到。**
+三档对应关系：
+
+| 测试 | 分值 | 归属 | 判据 |
+|---|---|---|---|
+| `check PMM` | 10 | 模块一（葛熠） | `[Test PMM] PASS` |
+| `check Process Create` | 10 | 模块二（钟一成） | `[Test Process Create] PASS` |
+| `check Schedule` | 10 | 模块三（吕鹏哲） | `[Test Schedule] PASS` + 三行输出串 |
+
+**过程时间线**（三人并行开发，各阶段独立复验过）：
+
+| 阶段 | 得分 | 说明 |
+|---|---|---|
+| 回填 lab2/lab3 + 模块一完成 | **10/30** | `check PMM: OK`，后两档因功能未实现而 WRONG |
+| 模块二合入 | **20/30** | `check Process Create: OK`，`check Schedule` 仍 WRONG |
+| 模块三合入 | **30/30** | 三档全 OK |
+
+**Test Process Create 断言的内容**（注入在 `proc_init()` 末尾）：
+
+- `current == idleproc`、`idleproc->pid == 0`、`state == PROC_RUNNABLE`、`kstack == bootstack`、
+  `parent == NULL`、`mm == NULL`、`tf == NULL`、`runs == 0`、`flags == 0`、`context.ra == 0`
+- `initproc->pid == 1`、`parent == idleproc`、`mm == NULL`、`context.ra != 0 && context.sp != 0`
+
+这十来个断言其实精确描述了"idleproc 是**复用当前执行现场**而不是 fork 出来的"这一事实：
+`kstack` 必须是启动栈 `bootstack`、`context.ra` 必须是 0（从没被切出去过）、`tf` 必须是 NULL。
+凡是把 idleproc 也走一遍 `do_fork` 的写法，都会在这里挂掉。
 
 ## 六、实验总结与收获
 
 ### 6.1 本实验知识点与 OS 原理的对应
 
+| 实验里做的事 | OS 原理中的概念 | 关系说明 |
+|---|---|---|
+| `page_insert` / `page_remove` + `page_ref` + TLB 失效 | 虚拟内存、页表、写时复制的基础 | 真实内核的 `mmap`/缺页处理最终都要落到"改页表项 + 管引用计数 + 刷 TLB"这三件事上 |
+| `struct proc_struct` | 进程控制块 PCB | Linux 的 `task_struct` 是同一角色，只是字段多几个数量级 |
+| `struct context` 只存 14 个寄存器 | 上下文切换、callee-saved 约定 | "只存必要的"依赖编译器的调用约定；x86 上同样只存被调用者保存寄存器 |
+| `struct trapframe` 36 个槽 | 中断现场、内核栈 | trapframe 与 context 是**两种不同粒度**的"现场"：前者用于同特权级的 trap 返回，后者用于跨线程切换 |
+| `switch_to` 只搬寄存器 | 协程/线程切换的本质 | 切换不是"CPU 主动切"，而是"函数返回时返回地址变了"，所以新线程从 `ret` 的目标开始跑 |
+| `kernel_thread` 造 trapframe 模板 | 线程的"第一次运行" | 本质是**伪造一次中断返回**：让 `sret` 以为刚刚从一个不存在的上下文里被打断 |
+| `schedule` 的 Round-Robin | 调度算法、就绪队列 | 真实内核用红黑树/多级队列提效，但"选一个 runnable 的"这一层语义完全相同 |
+| `idleproc` | 空闲进程 / 时间片兜底 | Linux 的 `swapper`/`idle` 线程与此同源 |
+| `local_intr_save/restore` 包住链表与 `current` 的修改 | 临界区、原子性 | 关中断是单核上最朴素的互斥；多核要换成自旋锁 |
+| `copy_mm` 只占位 | 地址空间复制 | `fork()` 的核心就是 `copy_mm`，lab5 才真正填上 |
+
 ### 6.2 OS 原理中重要但本实验未覆盖的知识点
+
+1. **进程退出与回收**：`do_exit()` 仍是 `panic("process exit!!")`，没有"置 ZOMBIE → 唤醒父进程 → 父进程回收"这一套。所以本实验的 `PROC_ZOMBIE` 状态从未真正出现过。
+2. **`wait` / `sleep` 与阻塞队列**：`PROC_SLEEPING` 也没有被用过，调度器只需要处理"就绪"与"运行"两种状态。
+3. **真正的地址空间隔离**：lab4 全程只有一个内核页表（`pgdir` 都等于 `boot_pgdir_pa`），`proc_run` 里的 `satp` 切换分支实际上从未走进去。用户态与进程独立地址空间是 lab5 的内容。
+4. **抢占式调度**：调度点只有 `cpu_idle` 一处（`need_resched` 由 `proc_init` 或线程自己置位）。真实内核要在时钟中断里检查时间片并置 `need_resched`，才能"打断正在跑的线程"。
+5. **多核与 IPI**：`proc_list`、`current` 只靠关中断保护，在 SMP 上不够；核间还要靠 IPI 触发重调度。
+6. **优先级与公平性**：Round-Robin 不看优先级、不记账（`runs` 只计数不做决策），stride/CFS 这类算法是 lab6 的内容。
+7. **TLB 的 ASID 与全局页**：`satp` 里没有设置 ASID，切换页表就整体 `sfence.vma`；真实内核用 ASID 避免全刷。
 
 ### 6.3 AI 协作开发的经历
 
+1. **把"测试会断言什么"写进提示词**。模块二的提示词里直接列出 `tf == NULL`、`context` 全 0、
+   `kstack == bootstack` 这些点，是因为 `test_lab4.c` 会逐个断言。先读测试、再写实现，比"写完再猜为什么不过"省一轮。
+2. **抽象约束比"照抄某个文件"更可靠**。模块三要求"照 `pmm.c::enable_paging()` 的思路构造 satp"，
+   而不是"复制那一行"。前者能推导出 `SATP_MODE_SV39 << 60`，还顺带发现了"`int` 直接左移 60 位是 UB、要先转 `uintptr_t`"。
+3. **分工的边界要按"能否独立验证"划**。三个人并行时最怕"改同一处"。我们的做法是按
+   `pmm.c` / `proc.c`（模块二那几个函数）/ `proc.c`+`sched.c`+`switch.S`（模块三）切，
+   并且**先用带 TODO 的占位实现把树保持在可编译、可启动状态**——这样任何人随时能 `make grade` 看自己的进度。
+4. **验证必须是可复现的命令**。报告里每一个 `OK` 都来自实际执行的 `make grade`，每个数字都来自实际运行的串口输出；
+   三个模块合入后由组长**清空重编、独立复跑**一次，确认不是"某人本机能过"。
+5. **AI 生成的汇编必须人工逐条核对偏移**。`switch.S` 的 `sd ra,0(a0) … sd s11,104(a0)` 与
+   `struct context` 的 14 个字段一一对应，编译器不会替我们检查这种"跨语言的隐式契约"，
+   错一位就是寄存器全乱。所以这 28 条指令是照结构体定义数出来的，不是凭记忆写的。
+
 ## 七、附录：提交记录
+
+| 提交 | 内容 |
+|---|---|
+| `6f90931` | 建 `lab4` 分支与工作树，放入 Lab4 材料，梳理实验内容与分工 |
+| `006651d` | 回填 lab2（Best-Fit / `page_init` / `PHYSICAL_MEMORY_END`）与 lab3（trap handler / `RESTORE_ALL`）；实现功能模块一 `page_insert` / `page_remove`；四处工具链兼容修复；`实验步骤.md` 框架 |
+| `79cd7e2` | 功能模块二（钟一成）：`alloc_proc` / `proc_init` / `kernel_thread` / `do_fork` / `copy_thread` / `copy_mm` |
+| `ca1a11d` | 文档：补模块三空标题，修正模块二 `proc_init` 说明与实际实现一致 |
+| `5b622c2` | 功能模块三（吕鹏哲）：`switch_to` / `schedule` / `proc_run` / `cpu_idle`，补模块二、三的报告与提示词 |
+
+**分工与实际交付**
+
+- [x] 功能模块一 `page_insert` / `page_remove`（葛熠）→ `[Test PMM] PASS`（10/10）
+- [x] 功能模块二 进程创建与初始化（钟一成）→ `[Test Process Create] PASS`（10/10）
+- [x] 功能模块三 进程调度与上下文切换（吕鹏哲）→ `[Test Schedule] PASS`（10/10）
+- [x] lab2 / lab3 回填 + 四处工具链兼容修复（葛熠）
+- [x] `make grade` = **30/30**
+- [x] 截图：`report/images/lab4_make_qemu.png`、`report/images/lab4_grade.png`
+- [x] 三份项目文档（`实验内容.md` / `实验步骤.md`）与答辩准备（`问答准备.md`）
